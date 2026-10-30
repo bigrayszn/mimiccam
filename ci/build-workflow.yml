@@ -1,0 +1,60 @@
+# GitHub Actions recipe for MimicCam, kept here as a template.
+#
+# Copy it to .github/workflows/build.yml in your clone (or paste it into the
+# repository's web editor) to get a Windows build on every push to main and
+# portable zips attached to v* tags. It is not active in this repo because
+# the automation that publishes it has no `workflow` scope.
+#
+#   mkdir -p .github/workflows && cp ci/build-workflow.yml .github/workflows/build.yml
+
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller
+
+      - name: Unit tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Check imports
+        run: python -c "import mimiccam, mimiccam.decart_engine, mimiccam.pipeline, mimiccam.ui; print('imports ok')"
+
+      - name: Build portable exe
+        run: python build.py
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MimicCam-windows-x64
+          path: dist/MimicCam-*-portable.zip
+          if-no-files-found: error
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/MimicCam-*-portable.zip
+          generate_release_notes: true

@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Build artifacts
+build/
+dist/
+release/
+*.spec
+*.zip
+*.exe
+*.msi
+
+# Test captures and scratch output
+tests/captures/
+tests/*.log
+tests/*.avi
+onnxruntime_profile_*.json
+.pytest_cache/
+
+# Local data: exported user folders, downloaded release copies, unrelated pages
+exports/
+downloads/
+installer/dist/
+photo_link/
+
+# Local secrets / device config
+.env
+api_key.txt
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Unrelated wallpaper experiment, not part of MimicCam
+wallpaper_analysis/

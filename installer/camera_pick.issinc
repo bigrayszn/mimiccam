@@ -1,0 +1,294 @@
+// Automatic webcam selection for the MimicCam installer.
+//
+// The exported settings.json names camera_index 1 - whatever the machine the
+// export was made on happened to number its webcam. On another PC that index
+// can be a device that never opens, a black virtual camera, or an IR camera
+// with the lens covered, and the app would then show an empty preview on the
+// first launch. So once the files are in place the installer asks the
+// just-installed exe which capture indices really deliver a picture, and
+// writes the best one into settings.json.
+//
+// Included by setup.iss; also used by camera_pick_test.iss.
+
+// Runs "MimicCam.exe --list-cameras" and returns its output, one line per
+// camera, joined with #10. Each line looks like:  index=1 1920x1080 luma=51.5
+function ProbeCameras: String;
+var
+  TmpFile, Command: String;
+  ResultCode: Integer;
+  Lines: TArrayOfString;
+  I: Integer;
+begin
+  Result := '';
+  TmpFile := ExpandConstant('{tmp}\cameras-probe.txt');
+  DeleteFile(TmpFile);
+  // Exec cannot capture stdout, so let cmd redirect it to a file.
+  Command := '/c ""' + ExpandConstant('{app}\MimicCam.exe') +
+             '" --list-cameras > "' + TmpFile + '" 2>&1"';
+  if not Exec(ExpandConstant('{cmd}'), Command, '', SW_HIDE,
+              ewWaitUntilTerminated, ResultCode) then
+    Exit;
+  if LoadStringsFromFile(TmpFile, Lines) then
+    for I := 0 to GetArrayLength(Lines) - 1 do
+      Result := Result + Lines[I] + #10;
+  DeleteFile(TmpFile);
+end;
+
+// The cursor-based word reader the line parser needs. Returns '' past the end.
+function NextWord(const Text: String; var Cursor: Integer): String;
+var
+  Start: Integer;
+begin
+  Result := '';
+  while (Cursor <= Length(Text)) and (Text[Cursor] = ' ') do
+    Cursor := Cursor + 1;
+  Start := Cursor;
+  while (Cursor <= Length(Text)) and (Text[Cursor] <> ' ') do
+    Cursor := Cursor + 1;
+  Result := Copy(Text, Start, Cursor - Start);
+end;
+
+// Brightness as a whole number. Only the leading integer digits are read: the
+// value is compared against a threshold and used to break ties, and staying
+// away from StrToFloat keeps the parse independent of the PC's decimal
+// separator ("51.5" would not convert on a machine that writes "51,5").
+function ParseLuma(const Line: String): Integer;
+var
+  P, Stop: Integer;
+  Text: String;
+begin
+  Result := 0;
+  P := Pos('luma=', Line);
+  if P = 0 then
+    Exit;
+  Text := Copy(Line, P + 5, Length(Line));
+  Stop := 1;
+  while (Stop <= Length(Text)) and
+        (((Text[Stop] >= '0') and (Text[Stop] <= '9')) or (Text[Stop] = '-')) do
+    Stop := Stop + 1;
+  Text := Copy(Text, 1, Stop - 1);
+  Result := StrToIntDef(Text, 0);
+end;
+
+// "index=1 1920x1080 luma=51.5" -> 1, 1920, 1080, 51. False for anything that
+// is not a camera line, so an error message or a warning on stdout is skipped
+// instead of being read as a camera.
+function ParseCameraLine(const Line: String;
+                         var Idx, Width, Height, Luma: Integer): Boolean;
+var
+  Cursor, XPos: Integer;
+  Token, SizeText: String;
+begin
+  Result := False;
+  Cursor := Pos('index=', Line);
+  if Cursor = 0 then
+    Exit;
+  Cursor := Cursor + 6;
+  Idx := StrToIntDef(NextWord(Line, Cursor), -1);
+  if Idx < 0 then
+    Exit;
+  SizeText := NextWord(Line, Cursor);
+  XPos := Pos('x', SizeText);
+  if XPos < 2 then
+    Exit;
+  Width := StrToIntDef(Copy(SizeText, 1, XPos - 1), 0);
+  Height := StrToIntDef(Copy(SizeText, XPos + 1, Length(SizeText) - XPos), 0);
+  if (Width <= 0) or (Height <= 0) then
+    Exit;
+  Luma := ParseLuma(Line);
+  Result := True;
+end;
+
+// Matches the app's own threshold: below this the device is an IR camera, or
+// has the lens covered, or is a virtual camera nobody is feeding.
+function CameraIsLit(Luma: Integer): Boolean;
+begin
+  Result := Luma >= 8;
+end;
+
+// A lit camera always beats a dark one - a dark device cannot make a video
+// call. Among equally lit cameras the larger picture wins (a 1080p webcam over
+// a 640x480 virtual device), then the brighter reading, then the lower index,
+// so devices that report the same size and brightness resolve the same way
+// every time.
+function BetterCamera(Idx, Width, Height, Luma,
+                      BestIdx, BestWidth, BestHeight, BestLuma: Integer): Boolean;
+begin
+  Result := False;
+  if CameraIsLit(Luma) <> CameraIsLit(BestLuma) then
+  begin
+    Result := CameraIsLit(Luma);
+    Exit;
+  end;
+  if Int64(Width) * Int64(Height) <> Int64(BestWidth) * Int64(BestHeight) then
+  begin
+    Result := Int64(Width) * Int64(Height) > Int64(BestWidth) * Int64(BestHeight);
+    Exit;
+  end;
+  if Luma <> BestLuma then
+  begin
+    Result := Luma > BestLuma;
+    Exit;
+  end;
+  // Same size, same brightness: take the lower index so the choice does not
+  // depend on the order the probe happened to list them in.
+  Result := Idx < BestIdx;
+end;
+
+// Picks the camera to preselect. False when the probe found nothing usable, in
+// which case settings.json is left exactly as it shipped.
+function BestCameraFromProbe(const Probe: String;
+                             var Idx, Width, Height, Luma: Integer): Boolean;
+var
+  Rest, Line: String;
+  Cut: Integer;
+  CandIdx, CandWidth, CandHeight, CandLuma: Integer;
+begin
+  Result := False;
+  Idx := 0;
+  Width := 0;
+  Height := 0;
+  Luma := 0;
+  Rest := Probe;
+  while Rest <> '' do
+  begin
+    // Split at the line ending. ('Break' is a reserved word here.)
+    Cut := Pos(#10, Rest);
+    if Cut = 0 then
+    begin
+      Line := Rest;
+      Rest := '';
+    end
+    else
+    begin
+      Line := Copy(Rest, 1, Cut - 1);
+      Rest := Copy(Rest, Cut + 1, Length(Rest) - Cut);
+    end;
+    Line := Trim(Line);
+    if Line = '' then
+    begin
+      // nothing to read on this line
+    end
+    else if ParseCameraLine(Line, CandIdx, CandWidth, CandHeight, CandLuma) then
+    begin
+      if not Result then
+      begin
+        Idx := CandIdx;
+        Width := CandWidth;
+        Height := CandHeight;
+        Luma := CandLuma;
+        Result := True;
+      end
+      else if BetterCamera(CandIdx, CandWidth, CandHeight, CandLuma,
+                           Idx, Width, Height, Luma) then
+      begin
+        Idx := CandIdx;
+        Width := CandWidth;
+        Height := CandHeight;
+        Luma := CandLuma;
+      end;
+    end;
+  end;
+end;
+
+// Rewrites one integer value in settings.json. The file is small, flat and
+// machine-written, so a targeted text edit is safer than pretending to parse
+// JSON. It is written back as UTF-8 without a BOM: the app reads it as plain
+// UTF-8 and a BOM would make it silently fall back to defaults.
+function SetJsonInt(const FileName, Key: String; Value: Integer): Boolean;
+var
+  Text, Needle, OldVal, NewVal: String;
+  KeyPos, ValStart, ValEnd, I: Integer;
+  Lines: TArrayOfString;
+begin
+  Result := False;
+  if not FileExists(FileName) then
+    Exit;
+  if not LoadStringsFromFile(FileName, Lines) then
+    Exit;
+
+  // One string, as FixReferenceImage does: JSON does not care about the line
+  // breaks and a single text is simpler to patch.
+  Text := '';
+  for I := 0 to GetArrayLength(Lines) - 1 do
+  begin
+    if I > 0 then
+      Text := Text + #13#10;
+    Text := Text + Lines[I];
+  end;
+
+  Needle := '"' + Key + '":';
+  KeyPos := Pos(Needle, Text);
+  if KeyPos = 0 then
+    Exit;
+  ValStart := KeyPos + Length(Needle);
+  // Spelled out rather than written as a set: this compiler does not accept
+  // character constants inside a set literal.
+  while (ValStart <= Length(Text)) and
+        ((Text[ValStart] = ' ') or (Text[ValStart] = #9) or
+         (Text[ValStart] = #13) or (Text[ValStart] = #10)) do
+    ValStart := ValStart + 1;
+  ValEnd := ValStart;
+  while (ValEnd <= Length(Text)) and
+        (((Text[ValEnd] >= '0') and (Text[ValEnd] <= '9')) or
+         (Text[ValEnd] = '-') or (Text[ValEnd] = '+')) do
+    ValEnd := ValEnd + 1;
+  if ValEnd = ValStart then
+    Exit;
+
+  OldVal := Copy(Text, ValStart, ValEnd - ValStart);
+  NewVal := IntToStr(Value);
+  if OldVal = NewVal then
+  begin
+    Result := True;
+    Exit;
+  end;
+
+  Delete(Text, ValStart, ValEnd - ValStart);
+  Insert(NewVal, Text, ValStart);
+
+  SetArrayLength(Lines, 1);
+  Lines[0] := Text;
+  Result := SaveStringsToUTF8FileWithoutBOM(FileName, Lines, False);
+end;
+
+// The whole step: probe, choose, record the choice in settings.json.
+procedure AutoPickCamera;
+var
+  Settings, Raw: String;
+  Idx, Width, Height, Luma: Integer;
+begin
+  Settings := GetDataDir('') + '\settings.json';
+
+  // onlyifdoesntexist ships the file on a first install, so an existing file
+  // means this PC has settings the user has since changed. Never override
+  // those: the camera they picked in Settings is the one they want.
+  if SettingsExisted then
+  begin
+    Log('settings.json was already on this PC; keeping its camera_index.');
+    Exit;
+  end;
+  if not FileExists(Settings) then
+  begin
+    Log('settings.json is missing; nothing to preselect.');
+    Exit;
+  end;
+
+  if not WizardSilent then
+    WizardForm.StatusLabel.Caption := 'Looking for your webcam...';
+
+  Raw := ProbeCameras;
+  if not BestCameraFromProbe(Raw, Idx, Width, Height, Luma) then
+  begin
+    Log('No working camera found; leaving the shipped camera_index in place.');
+    Exit;
+  end;
+
+  Log('Best camera: index ' + IntToStr(Idx) + ' (' + IntToStr(Width) + 'x' +
+      IntToStr(Height) + ', luma ' + IntToStr(Luma) + ')');
+
+  if SetJsonInt(Settings, 'camera_index', Idx) then
+    Log('settings.json: camera_index = ' + IntToStr(Idx))
+  else
+    Log('Could not rewrite camera_index in settings.json.');
+end;

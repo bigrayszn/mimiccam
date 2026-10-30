@@ -1,0 +1,124 @@
+// Virtual-camera detection for the MimicCam installer.
+//
+// MimicCam writes frames into a DirectShow camera that must already be
+// registered on the machine (OBS Studio's, or Unity Capture's). A target PC
+// without one installs fine but no app will list MimicCam as a camera, so the
+// installer asks the just-installed exe which backend it can open and, when
+// there is none, offers the OBS Studio and DroidCam download pages.
+//
+// Included by setup.iss; also used by the parser self-test.
+
+function ProbeVirtualCamera: String;
+var
+  TmpFile, Command: String;
+  ResultCode: Integer;
+  Lines: TArrayOfString;
+  I: Integer;
+begin
+  Result := '';
+  TmpFile := ExpandConstant('{tmp}\vcam-probe.txt');
+  DeleteFile(TmpFile);
+  // --list-backends prints one line and exits; redirect it to a file because
+  // Exec cannot capture stdout itself.
+  Command := '/c ""' + ExpandConstant('{app}\MimicCam.exe') +
+             '" --list-backends > "' + TmpFile + '" 2>&1"';
+  if not Exec(ExpandConstant('{cmd}'), Command, '', SW_HIDE,
+              ewWaitUntilTerminated, ResultCode) then
+    Exit;
+  if LoadStringsFromFile(TmpFile, Lines) then
+    for I := 0 to GetArrayLength(Lines) - 1 do
+      Result := Result + Lines[I] + ' ';
+  DeleteFile(TmpFile);
+end;
+
+// "Available virtual-camera backends: obs" -> "obs". Anything else (a crash,
+// no backend, the word "none") yields an empty string.
+function VirtualCameraNames(const Probe: String): String;
+var
+  Prefix, Lowered: String;
+  P: Integer;
+begin
+  Result := '';
+  Prefix := 'Available virtual-camera backends:';
+  P := Pos(Prefix, Probe);
+  if P = 0 then
+    Exit;
+  Result := Trim(Copy(Probe, P + Length(Prefix), Length(Probe)));
+  Lowered := Lowercase(Result);
+  if (Lowered = '') or (Lowered = 'none') then
+    Result := '';
+end;
+
+procedure OpenPage(const Url, What: String);
+var
+  ErrorCode: Integer;
+begin
+  if ShellExec('open', Url, '', '', SW_SHOWNORMAL, ewNoWait, ErrorCode) then
+    Log('Opened the ' + What + ' page: ' + Url)
+  else
+    MsgBox('The browser could not be opened. The page is:' + #13#10 + Url,
+           mbInformation, MB_OK);
+end;
+
+procedure OfferVirtualCameraHelp;
+var
+  Names: String;
+  Choice, Attempt: Integer;
+  Labels: TArrayOfString;
+begin
+  // A backend can answer "none" for a moment: the filter may still be
+  // starting, or another process (an already-open MimicCam, OBS) may hold the
+  // shared-memory producer. Retry before telling someone their driver is
+  // missing - a false prompt would send them off to install OBS for nothing.
+  Attempt := 0;
+  repeat
+    Names := VirtualCameraNames(ProbeVirtualCamera);
+    Attempt := Attempt + 1;
+    Log('Virtual-camera probe, attempt ' + IntToStr(Attempt) + ': "' + Names + '"');
+    if (Names = '') and (Attempt < 3) then
+      Sleep(2000);
+  until (Names <> '') or (Attempt >= 3);
+
+  if Names <> '' then
+  begin
+    Log('Virtual camera available: ' + Names);
+    Exit;
+  end;
+
+  if WizardSilent then
+  begin
+    Log('No virtual camera found; not prompting because the install is silent.');
+    Exit;
+  end;
+
+  // The array literal has to start on a line that does not begin with '[',
+  // otherwise the preprocessor reads it as a section tag.
+  Labels := ['&Open OBS Studio page'#13#10'Recommended - MimicCam can feed this one.',
+             'Open &DroidCam page'#13#10'Phone camera tool; not a MimicCam output.',
+             '&Skip'];
+
+  Choice := TaskDialogMsgBox(
+    'MimicCam is installed, but this PC has no virtual camera.',
+    'MimicCam sends its video into a camera driver that has to be registered ' +
+    'on this PC first. Until one is, Zoom, Teams, Discord and OBS will not ' +
+    'list MimicCam as a camera.' + #13#10#13#10 +
+    'OBS Studio installs the OBS Virtual Camera, which is the backend MimicCam ' +
+    'is built to feed; OBS itself does not need to be running afterwards. ' +
+    'DroidCam installs Dev47Apps'' virtual output, but that camera is driven by ' +
+    'the DroidCam app itself, so it will not appear as a MimicCam backend.' + #13#10#13#10 +
+    'If OBS is already on this PC, close any running MimicCam or OBS window ' +
+    'and start MimicCam once: the camera then frees up.',
+    mbInformation,
+    MB_YESNOCANCEL,
+    Labels,
+    IDYES);
+
+  Log('Virtual-camera dialog returned: ' + IntToStr(Choice));
+
+  if Choice = IDYES then
+    OpenPage('https://obsproject.com/download', 'OBS Studio')
+  else if Choice = IDNO then
+    OpenPage('https://www.dev47apps.com/droidcam/windows/', 'DroidCam')
+  else
+    Log('User skipped the virtual-camera download pages.');
+end;

@@ -1,0 +1,14 @@
+# MimicCam runtime dependencies (Windows x64, Python 3.10+)
+numpy>=1.26,<3
+opencv-python>=4.9
+pyvirtualcam>=0.11
+decart>=0.2.3
+livekit>=1.0,<2
+PySide6>=6.6,<7
+keyring>=24
+pillow>=10
+# Free offline engine: DirectML runs the models on any DirectX 12 GPU without
+# a CUDA toolkit. Linux/macOS fall back to the CPU build (slower, same code).
+onnx>=1.16
+onnxruntime-directml>=1.20; sys_platform == "win32"
+onnxruntime>=1.20; sys_platform != "win32"
