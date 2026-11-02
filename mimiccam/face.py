@@ -498,12 +498,22 @@ class FaceEmbedder:
 # still and 0.533 with the head moving, while still carrying the articulation.
 MOUTH_BLEND = 0.50
 
-# Eyes carry expression too: a blink from the render is a blink that never
-# happened. They also carry more identity than the lips - at 0.50 the motion
-# harness fell to 0.460 while panning, below the 0.50 the engine requires,
-# because ArcFace aligns on the eyes. 0.30 holds at 0.511 and still darkens the
-# lids enough for a blink to read.
-EYE_BLEND = 0.30
+# Both weights sit on a measured cliff, and the detail pass moved the cliff.
+# Averaging two different mouths peaks in the middle: with the 512 px render the
+# Laplacian variance inside the mouth window is 264 with no blend, 135 at 0.50,
+# 149 at 0.75 and 214 at 1.00, so the lips are the softest patch on the face at
+# exactly the weight articulation wants. Raising it is visibly cleaner - 0.75
+# reads as a real mouth - but the motion harness then measures 0.481 (0.65) and
+# 0.459 (0.70) against the character, under the 0.50 the engine requires: at
+# 1.00 similarity collapses to 0.491 because ArcFace reads the lips as identity.
+# So 0.50 is a ceiling, not a preference, and it is left alone.
+#
+# Eyes are the opposite: the same harness passes at anything from 0.15 to 0.50,
+# so the only reason for the weight is that a blink has to read. With the sharp
+# render a permanent live-eye mix is a permanent smear - variance 803 with no
+# blend, 677 at 0.15, 571 at 0.30, 493 at 0.45 - for a lid that is shut about one
+# frame in a hundred. 0.22 keeps the blink and gives back a tenth of the detail.
+EYE_BLEND = 0.22
 
 
 def mouth_alpha(size: int, landmarks: np.ndarray,

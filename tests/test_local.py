@@ -787,6 +787,17 @@ class ExpressionTests(unittest.TestCase):
             face.expression_alpha(self.SIZE, np.zeros((2, 2), np.float32), self.matrix)
         )
 
+    def test_the_lip_weight_stays_under_the_identity_cliff(self) -> None:
+        """Past 50% the harness stops seeing the character: measured, not a taste.
+
+        tests/verify_motion.py scores 0.481 with the lips at 65% and 0.459 at
+        70% against the 0.50 floor it enforces, so raising this constant is not
+        a free sharpening: it trades the whole swap.
+        """
+        self.assertLessEqual(face.MOUTH_BLEND, 0.50)
+        # The eyes have room; they are only as high as a blink needs.
+        self.assertLessEqual(face.EYE_BLEND, 0.30)
+
 
 if __name__ == "__main__":
     unittest.main()

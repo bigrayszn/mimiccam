@@ -199,11 +199,20 @@ that read as fake even when the geometry is perfect. Both are fixed the same way
   | off | 0.767 / 0.698 / 0.712 / 0.719 |
   | lips only at 50% | 0.602 / 0.533 / 0.548 / 0.557 |
   | lips 50% + eyes 50% | 0.553 / **0.460** / 0.525 / 0.514 - fails the 0.50 floor |
-  | **lips 50% + eyes 30% (shipped)** | **0.566 / 0.511 / 0.559 / 0.541** |
+  | lips 50% + eyes 30% | 0.566 / 0.511 / 0.559 / 0.541 |
+  | **lips 50% + eyes 22% (shipped)** | **0.567 / 0.531 / 0.555 / 0.563** |
 
   A swap that looks like the wrong person is worse than one with stiff lips, so
   the eyes carry less than the mouth: enough for a blink to read, not enough to
   argue with the character.
+- Blending two different mouths is what makes the lips the *softest* patch on a
+  now-sharp face. With the Detail pass on, Laplacian variance inside the mouth
+  window is **264** with no blend, **135** at the shipped 50%, 149 at 75% and 214
+  at 100%: averaging peaks in the middle. The mouth cannot move up - 65% measures
+  0.481 and 70% 0.459 on the harness, under its floor - so it stays at 50% and the
+  lips stay soft. The eyes had no such cliff: identity passes anywhere from 15% to
+  50%, so they came *down* to 22%, which is worth **+9%** detail in the eye window
+  (variance 571 -> 622) for a slightly fainter blink.
 - Cost: **+0.4 ms** a frame (4.8 vs 4.4 ms per paste, measured at 1280x720).
 - Switchable in the app: *Keep my mouth and eyes (real expression)*, on by default.
 
@@ -214,21 +223,22 @@ face next to a sharp room. The optional Detail pass closes that with **GFPGAN v1
 (Apache-2.0, 340 MB, downloaded only when the option is on):
 
 - It runs on **every second render**, not on every frame: **~44 ms** of the same GPU
-  the detector uses, so running it on each 13 Hz refresh cost more than it paid.
-  The paste still follows the live pose at full rate; only the fine detail refreshes
-  at 6-9 Hz.
+  the detector uses. On an idle laptop the loop still holds the camera's 30 fps
+  either way; with the machine loaded, every render fell to 23.6 fps where every
+  second one held 24.7. The paste still follows the live pose at full rate - only
+  the fine detail refreshes at ~9 Hz.
 - The enhanced texture is **pasted at 512 px**, not shrunk back to 128. Shrinking it
   throws the detail away again: measured on a real photo pair, a 512 paste is
   **3.4x sharper** in the face region (Laplacian variance 10.3 -> 35.1), a 256 paste
   only 1.15x, and a downscale back to 128 restores 7%.
-- What it costs: **38 -> 41 ms** a frame and **26.6 -> 24.7 fps** at 720p on the 4070
-  laptop (paste 2.6 -> 3.5 ms, the rest GPU contention with YuNet). That is below the
-  25 fps bar `tests/verify_local.py` sets for itself, so a `--detail` run of that
-  harness reports one failure on that check; everything else in it, and the whole
-  motion harness, passes.
+- What it costs, measured three times on the 4070 laptop at 720p: **21 -> 23 ms** a
+  frame (paste 2.6 -> 3.5 ms, the rest GPU contention with YuNet) and the frame loop
+  unchanged at **30 fps**. Under load it is not free: the earlier runs above were
+  taken while four other test runs shared the GPU and fell to 24.7 fps, which is why
+  the pass refuses to run on every render.
 - It rebuilds eyes, lashes, brows and skin texture from the crop's own pixels rather
   than inventing a different face: identity on the motion harness is
-  0.558/0.540/0.545/0.567 against 0.566/0.533/0.552/0.552 across still/pan/zoom/roll,
+  0.560/0.542/0.580/0.557 against 0.567/0.531/0.555/0.563 across still/pan/zoom/roll,
   all above its 0.50 floor. It is a judgement call, not a free win: GFPGAN sharpens
   the render's own smears into hard edges too, and a brow can come out drawn-on where
   the 128 px render was a smudge.

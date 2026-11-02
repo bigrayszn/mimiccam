@@ -45,9 +45,10 @@ POSE_HOLD_S = 0.40
 # face flickering between two renders.
 TEXTURE_BLEND = 0.60
 # Run GFPGAN on every second render. It costs ~44 ms of the same GPU the
-# detector uses: on every 13 Hz refresh the engine measured 23.6 fps against
-# 26.6, and halving the cadence recovers 24.7. The paste follows the live pose
-# either way, so detail refreshing at ~9 Hz still moves at frame rate.
+# detector uses. On an idle laptop that is free at the loop's 30 fps (23 ms a
+# frame against 21 without it); with the machine busy, every render measured
+# 23.6 fps where every second one held 24.7, so it keeps the headroom. The paste
+# follows the live pose either way: detail refreshes at ~9 Hz, the face does not.
 DETAIL_EVERY = 2
 # 720 px keeps landmarks precise enough to place the paste without eating a
 # third of the frame budget: 960 measured 12 ms, 640 measured 5 ms, 720 lands at

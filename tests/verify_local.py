@@ -20,9 +20,9 @@ once into a temp folder:
 
     python tests/verify_local.py --seconds 8
 
-``--detail`` runs the same take with the GFPGAN detail pass on. It measures about
-24.7 fps against 26.6 without it, so that run misses the 25 fps bar below by
-design: the option trades roughly two frames for a face 3.4x sharper.
+``--detail`` runs the same take with the GFPGAN detail pass on. On an idle
+machine both hit the loop's 30 fps ceiling and the pass costs 2-3 ms a frame;
+repeat the run on a loaded machine before reading anything into the numbers.
 """
 
 from __future__ import annotations
