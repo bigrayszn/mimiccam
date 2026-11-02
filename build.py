@@ -167,6 +167,11 @@ def smoke_test(exe: Path) -> None:
             "SMOKE TEST FAILED: the frozen exe could not run the offline engine. "
             "Check that onnxruntime and DirectML.dll were bundled."
         )
+    if "models not installed" in output:
+        # --check-local exits 0 when the models simply are not downloaded yet.
+        # Saying PASS there would claim a swap that never happened.
+        print("  SKIP - no models on this machine, so no swap was run")
+        return
     print("  PASS - the frozen exe loads the local models and swaps a frame")
 
 
