@@ -89,6 +89,7 @@ class LocalEngine(Engine):
         max_side: int = DETECT_MAX_SIDE,
         max_faces: int = 1,
         body_pass: bool = True,
+        keep_mouth: bool = True,
         studio_background: bool = False,
         studio_image: Optional[str] = None,
         matte_every: int = MATTE_EVERY,
@@ -105,6 +106,8 @@ class LocalEngine(Engine):
         self.max_side = max_side
         self.max_faces = max_faces
         self.body_pass = body_pass
+        # Lips come from the camera, everything else from the render.
+        self.keep_mouth = bool(keep_mouth)
         self.studio_background = bool(studio_background)
         # Defaults to the character photo: the room and the person come from
         # the same reference unless the user picks a separate room.
@@ -262,7 +265,9 @@ class LocalEngine(Engine):
             models.path("detector"), max_side=self.max_side, refine=False
         )
         self._embedder = face.FaceEmbedder(models.path("identity"), self.providers)
-        self._swapper = face.FaceSwapper(models.path("swapper"), self.providers)
+        self._swapper = face.FaceSwapper(
+            models.path("swapper"), self.providers, keep_mouth=self.keep_mouth
+        )
         self._provider = self._swapper.session.get_providers()[0]
         if self._strict_gpu and self._provider != "DmlExecutionProvider":
             raise LocalEngineError(

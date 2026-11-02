@@ -55,6 +55,10 @@ class Settings:
     # rest of the body.
     character_notes: str = ""
     studio_background: bool = False
+    # Paste the live mouth back over the swapped face. The swap network has no
+    # mouth tracking, so without this the character's lips stop matching what
+    # is being said.
+    keep_mouth: bool = True
     fast_mode: bool = False
     # Draw the raw camera as a small box over the output preview.
     pip_camera: bool = True

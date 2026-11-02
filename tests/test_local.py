@@ -669,5 +669,76 @@ class ModelBookkeepingTests(unittest.TestCase):
         self.assertIn("non-commercial research", text)
 
 
+class MouthMaskTests(unittest.TestCase):
+    """The lips are the one feature taken from the camera, not the render.
+
+    inswapper has no mouth tracking, so a swapped face keeps the character's
+    mouth shape through every sentence. These tests pin the geometry that puts
+    the live lips back: centred on the mouth, scaled to its width, rolled with
+    the head, and never reaching as high as the eyes.
+    """
+
+    SIZE = 128
+
+    def _landmarks(self, width: float = 24.0, angle: float = 0.0,
+                   centre: tuple[float, float] = (64.0, 92.0)) -> np.ndarray:
+        half = width / 2.0
+        dx, dy = np.cos(angle) * half, np.sin(angle) * half
+        return np.array(
+            [
+                [40.0, 40.0], [88.0, 40.0], [64.0, 66.0],
+                [centre[0] - dx, centre[1] - dy],
+                [centre[0] + dx, centre[1] + dy],
+            ],
+            np.float32,
+        )
+
+    def _alpha(self, landmarks: np.ndarray) -> np.ndarray:
+        return face.mouth_alpha(self.SIZE, landmarks, np.eye(2, 3, dtype=np.float32))
+
+    def test_mask_sits_on_the_lips_and_away_from_the_eyes(self) -> None:
+        alpha = self._alpha(self._landmarks())
+        self.assertIsNotNone(alpha)
+        ys, xs = np.nonzero(alpha > 40)
+        self.assertGreater(ys.size, 40)
+        self.assertAlmostEqual(float(xs.mean()), 64.0, delta=3.0)
+        # The corners sit on the lip line; the lips hang below it.
+        self.assertGreater(float(ys.mean()), 92.0)
+        self.assertLess(float(ys.mean()), 104.0)
+        self.assertEqual(int(alpha[:50].max()), 0)
+
+    def test_a_wider_mouth_gets_a_wider_mask(self) -> None:
+        narrow = self._alpha(self._landmarks(width=16.0))
+        wide = self._alpha(self._landmarks(width=32.0))
+        self.assertGreater((wide > 40).sum(), 2.5 * (narrow > 40).sum())
+
+    def test_mask_rolls_with_the_head(self) -> None:
+        for degrees in (30.0, -30.0):
+            alpha = self._alpha(self._landmarks(angle=float(np.radians(degrees))))
+            moments = cv2.moments((alpha > 40).astype(np.uint8), binaryImage=True)
+            theta = 0.5 * np.degrees(
+                np.arctan2(2 * moments["mu11"], moments["mu20"] - moments["mu02"])
+            )
+            error = ((theta - degrees + 90) % 180) - 90
+            self.assertAlmostEqual(float(error), 0.0, delta=8.0)
+
+    def test_degenerate_landmarks_are_ignored(self) -> None:
+        self.assertIsNone(self._alpha(self._landmarks(width=0.0)))
+        self.assertIsNone(
+            face.mouth_alpha(
+                self.SIZE, np.zeros((3, 2), np.float32), np.eye(2, 3, dtype=np.float32)
+            )
+        )
+
+    def test_blend_takes_the_live_pixels_where_the_mask_is_opaque(self) -> None:
+        base = np.full((8, 8, 3), 10, np.uint8)
+        top = np.full((8, 8, 3), 200, np.uint8)
+        alpha = np.zeros((8, 8), np.uint8)
+        alpha[:, :4] = 255
+        out = face.blend_alpha(base, top, alpha)
+        self.assertTrue((out[:, :4] == 200).all())
+        self.assertTrue((out[:, 4:] == 10).all())
+
+
 if __name__ == "__main__":
     unittest.main()

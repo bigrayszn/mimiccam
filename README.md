@@ -173,6 +173,24 @@ the head ellipse, above the eyes. On your reference photo that is about 26% of
 Hair colour, skin tone and head shape then match the character. Clothing and body
 shape do not: that is generative work, and Lucy mode is where it happens.
 
+### The mouth
+
+inswapper has no mouth tracking. It renders the character's lips in whatever
+shape the reference photo had, so on a call the face keeps someone else's mouth
+through every sentence - the one artefact that reads as fake even when the
+geometry is perfect. The fix costs about as little as a fix can:
+
+- The five landmarks already pin the mouth exactly: the two corners give its
+  centre, its width and the roll of the head. No 68- or 106-point model needed.
+- Every frame, a feathered ellipse over the lips in the *live* crop is blended
+  over the rendered texture - after the render, before the paste, so the lips
+  move at frame rate even though the network refreshes a few times a second.
+- Only the lips change: with the mask on, a painted marker on the subject's
+  mouth reaches the output and the rest of the face is untouched (measured mean
+  difference 91.5/255 inside the mouth region, 0.005 everywhere else).
+- Cost: **+0.4 ms** a frame (4.8 vs 4.4 ms per paste, measured at 1280x720).
+- Switchable in the app: *Keep my mouth (accurate lip movement)*, on by default.
+
 ### Body and arms
 
 A 128 px face network only owns the face; the neck, chest and arms keep the

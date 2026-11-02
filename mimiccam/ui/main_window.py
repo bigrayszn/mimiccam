@@ -524,6 +524,14 @@ class MainWindow(QMainWindow):
         self.studio_hint.setWordWrap(True)
         char_layout.addWidget(self.studio_hint)
 
+        self.mouth_check = QCheckBox("Keep my mouth (accurate lip movement)")
+        self.mouth_check.setToolTip(
+            "Pastes your own lips over the swapped face every frame. The swap "
+            "network has no mouth tracking, so without this the character's "
+            "mouth stops matching what you are saying."
+        )
+        char_layout.addWidget(self.mouth_check)
+
         self.preset_combo = QComboBox()
         for preset in PRESETS:
             self.preset_combo.addItem(preset.label, preset.key)
@@ -604,6 +612,7 @@ class MainWindow(QMainWindow):
         if self.settings.reference_image:
             self._set_reference(self.settings.reference_image, announce=False)
         self.studio_check.setChecked(self.settings.studio_background)
+        self.mouth_check.setChecked(self.settings.keep_mouth)
 
         backend_index = self.backend_combo.findData(self.settings.vcam_backend)
         if backend_index >= 0:
@@ -1045,6 +1054,7 @@ class MainWindow(QMainWindow):
         self.settings.character_notes = self.notes_edit.text().strip()
         self.settings.reference_image = self._reference_path
         self.settings.studio_background = self.studio_check.isChecked()
+        self.settings.keep_mouth = self.mouth_check.isChecked()
         self.settings.fast_mode = self.fast_check.isChecked()
         self.settings.pause_when_idle = self.pause_check.isChecked()
         self.settings.pip_camera = self.pip_check.isChecked()
@@ -1130,6 +1140,7 @@ class MainWindow(QMainWindow):
                     height=settings.height,
                     fps=settings.fps,
                     on_log=self.bridge.log.emit,
+                    keep_mouth=settings.keep_mouth,
                     studio_background=settings.studio_background,
                     studio_image=(self._reference_path or None)
                     if settings.studio_background else None,

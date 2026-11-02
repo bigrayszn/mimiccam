@@ -491,6 +491,50 @@ class FaceEmbedder:
 
 
 # -- swap ------------------------------------------------------------------
+def mouth_alpha(size: int, landmarks: np.ndarray,
+                matrix: np.ndarray) -> Optional[np.ndarray]:
+    """Soft mask over the lips, in the same 128px crop space as the texture.
+
+    inswapper renders the whole face from the character photo, mouth included.
+    With five landmarks and no mouth tracking, the swapped lips sit in roughly
+    the right place but stop matching what is being said, which is the first
+    thing anyone notices on a call. Copying the live crop's mouth back over the
+    render restores articulation the network never saw.
+
+    The mouth is the one feature the five landmarks pin down exactly, which is
+    why this works without a 68- or 106-point model: the two corners give the
+    centre, the width and the roll of the head.
+    """
+    points = cv2.transform(
+        np.asarray(landmarks, np.float32).reshape(1, -1, 2), matrix
+    ).reshape(-1, 2)
+    if points.shape[0] < 5:
+        return None
+    left, right = points[3], points[4]
+    width = float(np.hypot(*(right - left)))
+    if not np.isfinite(width) or width < size * 0.08:
+        return None
+    centre = (left + right) * 0.5
+    # The corners sit on the lip line; the lips themselves hang below it.
+    centre[1] += width * 0.10
+    angle = float(np.degrees(np.arctan2(right[1] - left[1], right[0] - left[0])))
+    axes = (max(2, int(width * 0.58)), max(2, int(width * 0.44)))
+    mask = np.zeros((size, size), np.uint8)
+    cv2.ellipse(
+        mask, (int(round(centre[0])), int(round(centre[1]))), axes, angle, 0, 360, 255, -1
+    )
+    k = max(3, int(width * 0.30) | 1)
+    return cv2.GaussianBlur(mask, (k, k), 0)
+
+
+def blend_alpha(base: np.ndarray, top: np.ndarray, alpha: np.ndarray) -> np.ndarray:
+    """Put ``top`` over ``base`` where the uint8 ``alpha`` is opaque."""
+    weight = cv2.cvtColor(alpha, cv2.COLOR_GRAY2BGR)
+    front = cv2.multiply(top, weight, scale=1.0 / 255.0)
+    back = cv2.multiply(base, cv2.bitwise_not(weight), scale=1.0 / 255.0)
+    return cv2.add(front, back)
+
+
 class FaceSwapper:
     """The 128x128 identity swap network.
 
@@ -500,9 +544,12 @@ class FaceSwapper:
     needs a C compiler on Windows.
     """
 
-    def __init__(self, model_path: str | Path, providers: Optional[list[str]] = None) -> None:
+    def __init__(self, model_path: str | Path, providers: Optional[list[str]] = None,
+                 keep_mouth: bool = True) -> None:
         self.model_path = str(model_path)
         self.session = _session(self.model_path, providers)
+        # See mouth_alpha: the lips come from the live frame, not the render.
+        self.keep_mouth = bool(keep_mouth)
         self.input_names = [item.name for item in self.session.get_inputs()]
         shape = self.session.get_inputs()[0].shape
         self.size = int(shape[2] or 128)
@@ -579,9 +626,17 @@ class FaceSwapper:
         """Glue a rendered texture onto this frame using *current* landmarks.
 
         Separating render from paste is what keeps the face moving at frame
-        rate while the network refreshes the detail a few times a second.
+        rate while the network refreshes the detail a few times a second. The
+        mouth is the exception: it is taken from this frame every time, because
+        a texture rendered a third of a second ago is already the wrong shape.
         """
-        return self._composite(frame_bgr, texture, norm_matrix(landmarks, self.size))
+        matrix = norm_matrix(landmarks, self.size)
+        if self.keep_mouth:
+            alpha = mouth_alpha(self.size, landmarks, matrix)
+            if alpha is not None:
+                live = crop(frame_bgr, matrix, self.size)
+                texture = blend_alpha(texture, live, alpha)
+        return self._composite(frame_bgr, texture, matrix)
 
     def swap(self, frame_bgr: np.ndarray, landmarks: np.ndarray,
              embedding: np.ndarray) -> np.ndarray:
@@ -595,7 +650,8 @@ class FaceSwapper:
         )
         rendered = outputs[0][0].transpose(1, 2, 0)
         fake = np.clip(255.0 * rendered, 0, 255).astype(np.uint8)[:, :, ::-1]
-        return self._composite(frame_bgr, fake, matrix)
+        # Goes through paste() so a one-shot swap keeps the mouth too.
+        return self.paste(frame_bgr, fake, landmarks)
 
     def _composite(self, frame_bgr: np.ndarray, texture: np.ndarray,
                    matrix: np.ndarray) -> np.ndarray:
