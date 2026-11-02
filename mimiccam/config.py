@@ -55,6 +55,10 @@ class Settings:
     # rest of the body.
     character_notes: str = ""
     studio_background: bool = False
+    # Try-on mode: Lucy replaces the outfit from a garment photo instead of
+    # swapping the person. ``prompt`` then describes the garment.
+    tryon: bool = False
+    garment_image: str = ""
     # Paste the live mouth back over the swapped face. The swap network has no
     # mouth tracking, so without this the character's lips stop matching what
     # is being said.

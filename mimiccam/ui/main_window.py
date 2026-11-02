@@ -48,7 +48,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import __app_name__, __version__, models
+from .. import __app_name__, __version__, models, tryon
 from ..capture import CameraCapture, CameraEntry, probe_cameras
 from ..config import Settings, characters_dir, get_api_key, mask_key, set_api_key
 from ..credits import clock, money, remaining_usd, usd_per_second
@@ -205,6 +205,7 @@ class MainWindow(QMainWindow):
         self.pipeline: Pipeline | None = None
         self._preview_size = (960, 540)
         self._reference_path: str = ""
+        self._garment_path: str = ""
         self._running = False
         self._syncing_look = False
         self._gpu = nvidia_info()
@@ -532,6 +533,34 @@ class MainWindow(QMainWindow):
         )
         char_layout.addWidget(self.mouth_check)
 
+        # Try-on is a different Lucy model, not a different prompt: it takes a
+        # garment photo and dresses the person in it, so the character image is
+        # not used at all.
+        self.tryon_check = QCheckBox("Try-on: wear the garment in a photo (Lucy)")
+        self.tryon_check.setToolTip(
+            "lucy-vton-latest replaces whatever you are wearing with the garment "
+            "in a photo - the item alone on a clean background works best. Needs "
+            "Lucy mode (API key, billed per second). The character photo is ignored."
+        )
+        self.tryon_check.toggled.connect(self._tryon_toggled)
+        char_layout.addWidget(self.tryon_check)
+
+        garment_row = QHBoxLayout()
+        self.garment_btn = QPushButton("Choose garment...")
+        self.garment_btn.clicked.connect(self._pick_garment)
+        self.send_garment_btn = QPushButton("Send to call")
+        self.send_garment_btn.setToolTip(
+            "Applies the garment and the description above to the running call "
+            "without reconnecting."
+        )
+        self.send_garment_btn.clicked.connect(self._send_garment)
+        self.garment_label = QLabel("no garment")
+        self.garment_label.setObjectName("hint")
+        garment_row.addWidget(self.garment_btn)
+        garment_row.addWidget(self.send_garment_btn)
+        garment_row.addWidget(self.garment_label, 1)
+        char_layout.addLayout(garment_row)
+
         self.preset_combo = QComboBox()
         for preset in PRESETS:
             self.preset_combo.addItem(preset.label, preset.key)
@@ -613,6 +642,11 @@ class MainWindow(QMainWindow):
             self._set_reference(self.settings.reference_image, announce=False)
         self.studio_check.setChecked(self.settings.studio_background)
         self.mouth_check.setChecked(self.settings.keep_mouth)
+        self._garment_path = self.settings.garment_image
+        if self._garment_path:
+            self.garment_label.setText(Path(self._garment_path).name)
+        self.tryon_check.setChecked(self.settings.tryon)
+        self._tryon_toggled(self.settings.tryon)
 
         backend_index = self.backend_combo.findData(self.settings.vcam_backend)
         if backend_index >= 0:
@@ -850,6 +884,76 @@ class MainWindow(QMainWindow):
         self.thumb.setText("no reference")
         self.thumb.setStyleSheet("border: 1px dashed #3a424e; border-radius: 6px; color: #6b7280;")
 
+    # -- try-on ------------------------------------------------------------
+    def _tryon_toggled(self, on: bool) -> None:
+        """Try-on replaces the outfit, so the character photo step is paused."""
+        on = bool(on)
+        self.settings.tryon = on
+        self.garment_btn.setEnabled(on)
+        self.send_garment_btn.setEnabled(on and self._running)
+        if on:
+            self.prompt_edit.setPlaceholderText(
+                "Black leather bomber jacket with ribbed cuffs, relaxed fit"
+            )
+            # A preset prompt left over from character mode would be sent as the
+            # garment instruction - "substitute the whole person" dressed as a
+            # shirt. Replace it unless the user has typed something of their own.
+            current = self.prompt_edit.toPlainText().strip()
+            if not current or current in {preset.prompt.strip() for preset in PRESETS}:
+                self.prompt_edit.setPlainText(tryon.DEFAULT_PROMPT)
+            self.hint.setText(
+                "Try-on dresses you in the garment photo: the character image is "
+                "not used, only the clothing changes, and it bills per second "
+                "like Lucy."
+            )
+
+    def _live_decart_engine(self):
+        """The running Decart engine, or None when nothing is live."""
+        pipeline = getattr(self, "pipeline", None)
+        return getattr(pipeline, "engine", None) if pipeline else None
+
+    def _pick_garment(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose a garment photo", "", "Images (*.png *.jpg *.jpeg *.webp)"
+        )
+        if not path:
+            return
+        target = characters_dir() / Path(path).name
+        try:
+            if Path(path).resolve() != target.resolve():
+                shutil.copyfile(path, target)
+        except OSError as exc:
+            QMessageBox.warning(self, "Could not copy image", str(exc))
+            return
+        self._set_garment(str(target))
+
+    def _set_garment(self, path: str) -> None:
+        self._garment_path = path
+        self.settings.garment_image = path
+        self.garment_label.setText(Path(path).name)
+        self.send_garment_btn.setEnabled(self.tryon_check.isChecked())
+        self._apply_garment()
+
+    def _send_garment(self) -> None:
+        """Re-send the outfit, with whatever the user has edited above it."""
+        if not self._garment_path:
+            self.hint.setText("Choose a garment photo first.")
+            return
+        self._apply_garment()
+
+    def _apply_garment(self) -> None:
+        """Push a garment into the live session; a no-op when none is running."""
+        engine = self._live_decart_engine()
+        if engine is None or not getattr(engine, "try_on", False):
+            return
+        try:
+            engine.set_garment(
+                self._garment_path, self.prompt_edit.toPlainText().strip()
+            )
+            self.hint.setText("New outfit sent to the call.")
+        except Exception as exc:  # noqa: BLE001 - a failed image is not fatal
+            QMessageBox.warning(self, "Could not send the garment", str(exc))
+
     def _preset_changed(self) -> None:
         key = self.preset_combo.currentData()
         preset = get_preset(key)
@@ -1055,6 +1159,8 @@ class MainWindow(QMainWindow):
         self.settings.reference_image = self._reference_path
         self.settings.studio_background = self.studio_check.isChecked()
         self.settings.keep_mouth = self.mouth_check.isChecked()
+        self.settings.tryon = self.tryon_check.isChecked()
+        self.settings.garment_image = self._garment_path
         self.settings.fast_mode = self.fast_check.isChecked()
         self.settings.pause_when_idle = self.pause_check.isChecked()
         self.settings.pip_camera = self.pip_check.isChecked()
@@ -1099,6 +1205,14 @@ class MainWindow(QMainWindow):
 
         engine = None
         if settings.mode == "decart":
+            if settings.tryon and not self._garment_path:
+                self.start_btn.setEnabled(True)
+                self.start_btn.setText("Start camera")
+                QMessageBox.warning(
+                    self, "No garment photo",
+                    "Try-on needs a garment photo: choose one under Try-on first.",
+                )
+                return
             try:
                 from ..decart_engine import DecartEngine
 
@@ -1109,9 +1223,10 @@ class MainWindow(QMainWindow):
                     fps=settings.fps,
                     prompt=self.prompt_edit.toPlainText().strip(),
                     preset_key=settings.preset,
-                    reference_image=self._reference_path or None,
+                    reference_image=None if settings.tryon else (self._reference_path or None),
                     character_notes=settings.character_notes,
-                    model=settings.model,
+                    garment_image=self._garment_path if settings.tryon else None,
+                    model=tryon.MODEL if settings.tryon else settings.model,
                     fast_mode=settings.fast_mode,
                     pause_when_idle=settings.pause_when_idle,
                     on_log=self.bridge.log.emit,

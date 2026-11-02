@@ -64,6 +64,7 @@ class ModuleImportTests(unittest.TestCase):
             "mimiccam.presets",
             "mimiccam.prompting",
             "mimiccam.reference",
+            "mimiccam.tryon",
             "mimiccam.vcam",
             "mimiccam.ui",
             "mimiccam.ui.download",

@@ -363,6 +363,45 @@ source person by design. Changing the prompt mid-call re-uses the open session v
 `RealtimeClient.set()`, so you can switch looks without reconnecting. Switching the
 *reference image* is heavier - start a fresh session for best results.
 
+## Try-on: clothes that actually change
+
+Character swap introduces you as someone else; it cannot dress you. Decart ships a
+second realtime model for that - **`lucy-vton-latest`** - and MimicCam now speaks it.
+It takes the live camera plus a **garment** reference image and streams back the person
+wearing that garment, with the same WebRTC session, the same virtual camera and the
+same per-second billing.
+
+How to use it:
+
+1. **Engine -> Lucy 2.5 via Decart** (it needs the key and the credits; the free local
+   engine cannot do this).
+2. Tick **Try-on: wear the garment in a photo**. The character photo is then ignored -
+   the reference image *is* the outfit.
+3. **Choose garment...** - the item on its own against a clean background works best,
+   at least 512 px. Transparent cut-outs are flattened onto white; a 3000 px photo is
+   brought down to 1280.
+4. Describe it, then **Start camera**. While the call runs, **Choose garment...** or
+   **Send to call** swaps the outfit **without reconnecting** - the model applies
+   whatever garment arrives in the reference image.
+
+What the prompt has to look like (`mimiccam/tryon.py` enforces the first rule):
+
+- *Substitute the current top with a black leather bomber jacket with ribbed cuffs* -
+  replacing something you are wearing. *Add a navy baseball cap* - something new. A
+  bare description ("black leather jacket") is prefixed with the substitute verb,
+  because the model reads a noun phrase as a caption rather than an instruction.
+- 20-30 words naming colour, material and fit. "Put a jacket on" is too vague; "red
+  hoodie" has no action.
+- **One garment at a time.** Two tops in one sentence is how the output turns to mush.
+
+What it does not do: body shape. Try-on changes clothing, hats and accessories; the
+person underneath stays you. For a different build, Lucy mode with a **full-body**
+character photo is still the only route in this app.
+
+Billing: same per-second realtime meter as Lucy 2.5, and MimicCam's meter assumes that
+rate (**$0.02/s**, $0.04/s in fast mode). Decart does not publish a separate try-on
+price in anything this project has read, so treat the meter as an estimate.
+
 ## Cost, honestly
 
 Lucy 2.5 realtime bills **$0.02 per second of active generation** ($1.20/min).
@@ -525,6 +564,9 @@ No frame ever crosses a thread boundary through a queue: each stage keeps one sl
 | Studio room: first Start takes 15-20 s | That is the one-time room build (LaMa on the CPU, measured 6.9 s for the pass plus model load). It is cached per photo afterwards; the log prints *loaded from cache* |
 | Studio room: choppy | Expected on the free engine - the per-frame composite costs about as much as the body pass (see the measured table). A plain swap is ~27 fps, studio mode ~25 fps at 720p. Lucy mode does this in the cloud instead |
 | Lucy disconnects after ~10 s | Check your Decart quota (`GET /v1/realtime/quota`) and that the key is valid |
+| Try-on mode: nothing changes | It needs Lucy mode and a garment photo; the character image is ignored. Check the log line "Try-on garment: ..." |
+| Try-on: the garment lands as a pattern, not clothing | The reference was a photo of someone wearing it. Use the item alone on a clean background |
+| Try-on: two garments blur together | One instruction at a time - a second garment goes in a second sentence after the first lands |
 | Stutter every few seconds | Another app is grabbing the webcam, or Wi-Fi is saturated; watch the held-frames counter in the status bar |
 
 ## Privacy

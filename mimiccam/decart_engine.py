@@ -20,6 +20,7 @@ import asyncio
 import collections
 import threading
 import time
+from pathlib import Path
 from typing import Optional
 
 import cv2
@@ -35,7 +36,7 @@ from decart import (
 )
 from livekit import rtc
 
-from . import __version__, credits, prompting, reference
+from . import __version__, credits, prompting, reference, tryon
 from .engine import Engine
 
 WATCHDOG_TIMEOUT_S = 12.0
@@ -91,6 +92,7 @@ class DecartEngine(Engine):
         preset_key: str = "character",
         reference_image: Optional[str] = None,
         character_notes: str = "",
+        garment_image: Optional[str] = None,
         model: str = "lucy-2.5",
         fast_mode: bool = False,
         pause_when_idle: bool = True,
@@ -103,6 +105,9 @@ class DecartEngine(Engine):
         self.fps = fps
         self.preset_key = preset_key
         self.character_notes = (character_notes or "").strip()
+        # Try-on mode: the reference image is a garment, not a face.
+        self.garment_image = garment_image or ""
+        self.try_on = bool(self.garment_image)
         self.appearance: Optional[reference.Appearance] = None
         self.prompt = prompt
         self.model_name = model
@@ -141,23 +146,32 @@ class DecartEngine(Engine):
         self._source: Optional[rtc.VideoSource] = None
         self._consumer_task: Optional[asyncio.Task] = None
 
-        self._reference_bytes = load_reference_image(reference_image) if reference_image else None
-        if reference_image:
-            try:
-                self.appearance = reference.analyse(reference_image)
-            except Exception as exc:  # noqa: BLE001 - a photo we cannot read is not fatal
-                self._log(f"Could not read the character photo: {exc}")
-        if self.preset_key == "character":
-            # The whole-person wording plus the character's own description: an
-            # image alone is under-used, and the model otherwise fills the body
-            # with whatever the camera is already wearing.
-            self.prompt = prompting.character_prompt(
-                self.prompt,
-                appearance=self.appearance,
-                notes=self.character_notes,
-            )
-        if self.appearance is not None and self.appearance.framing.hint:
-            self._log(f"Character photo: {self.appearance.framing.hint}")
+        if self.try_on:
+            # A garment is not a face: no appearance analysis and no character
+            # template, because the reference image *is* the outfit.
+            self.name = "Lucy try-on"
+            self._reference_bytes = tryon.prepare_garment(self.garment_image)
+            self.prompt = tryon.as_prompt(self.prompt)
+            self._log(f"Try-on garment: {self.garment_image}")
+            self._log(f"Try-on prompt: {self.prompt}")
+        else:
+            self._reference_bytes = load_reference_image(reference_image) if reference_image else None
+            if reference_image:
+                try:
+                    self.appearance = reference.analyse(reference_image)
+                except Exception as exc:  # noqa: BLE001 - a photo we cannot read is not fatal
+                    self._log(f"Could not read the character photo: {exc}")
+            if self.preset_key == "character":
+                # The whole-person wording plus the character's own description: an
+                # image alone is under-used, and the model otherwise fills the body
+                # with whatever the camera is already wearing.
+                self.prompt = prompting.character_prompt(
+                    self.prompt,
+                    appearance=self.appearance,
+                    notes=self.character_notes,
+                )
+            if self.appearance is not None and self.appearance.framing.hint:
+                self._log(f"Character photo: {self.appearance.framing.hint}")
         self.connected = threading.Event()
         self.reconnects = 0
         self.frames_published = 0
@@ -286,6 +300,20 @@ class DecartEngine(Engine):
             asyncio.run_coroutine_threadsafe(_apply(), loop)
         except Exception as exc:  # noqa: BLE001
             self._log(f"Prompt update failed: {exc}")
+
+    def set_garment(self, path: str, prompt: Optional[str] = None) -> None:
+        """Switch outfits mid-call without reconnecting.
+
+        The try-on model applies whatever garment is in the reference image, so a
+        new photo plus its sentence is the whole update. Nothing to tear down.
+        """
+        if not self.try_on:
+            raise RuntimeError("This session is not a try-on session")
+        self._reference_bytes = tryon.prepare_garment(path)
+        self.garment_image = path
+        text = self.prompt if prompt is None else tryon.as_prompt(prompt)
+        self._log(f"New garment: {Path(path).name}")
+        self.set_prompt(text)
 
     # -- thread / event loop ----------------------------------------------
     def _thread_main(self) -> None:
