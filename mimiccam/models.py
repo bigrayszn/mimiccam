@@ -41,6 +41,8 @@ INSIGHTFACE_URL = "https://github.com/deepinsight/insightface/releases/download/
 # downloaded when the user turns the reference-room background on.
 CORE_KEYS = ("detector", "identity", "swapper")
 STUDIO_KEYS = ("matte", "inpaint")
+# Optional: only fetched when the user leaves the Detail pass on.
+DETAIL_KEYS = ("enhancer",)
 
 
 class ModelError(RuntimeError):
@@ -105,6 +107,16 @@ SPECS: tuple[ModelSpec, ...] = (
         size_bytes=208044816,
         purpose="Removes the reference person when building the studio room",
         licence="Apache-2.0 (LaMa); trained on Places2 (CC-BY 4.0)",
+    ),
+    ModelSpec(
+        key="enhancer",
+        filename="gfpgan_1.4.onnx",
+        url="https://huggingface.co/Neus/GFPGANv1.4/resolve/main/GFPGANv1.4.onnx",
+        size_bytes=340256686,
+        purpose="Restores detail in the 128 px swapped face (GFPGAN v1.4)",
+        # Apache-2.0 is the grant on Tencent's release; FFHQ, which the weights
+        # were trained on, is CC BY-NC-SA. See FACE_ENHANCERS.md for the survey.
+        licence="Apache-2.0 (GFPGAN, TencentARC); trained on FFHQ (CC BY-NC-SA 4.0)",
     ),
 )
 

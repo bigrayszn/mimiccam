@@ -533,6 +533,14 @@ class MainWindow(QMainWindow):
         )
         char_layout.addWidget(self.mouth_check)
 
+        self.detail_check = QCheckBox("Sharper face (GFPGAN detail, +340 MB model)")
+        self.detail_check.setToolTip(
+            "Restores eyes, beard and skin texture in the rendered face. Costs "
+            "about 44 ms per render on a 4070, so the face refreshes at roughly "
+            "10 Hz instead of 16. Free engine only."
+        )
+        char_layout.addWidget(self.detail_check)
+
         # Try-on is a different Lucy model, not a different prompt: it takes a
         # garment photo and dresses the person in it, so the character image is
         # not used at all.
@@ -642,6 +650,7 @@ class MainWindow(QMainWindow):
             self._set_reference(self.settings.reference_image, announce=False)
         self.studio_check.setChecked(self.settings.studio_background)
         self.mouth_check.setChecked(self.settings.keep_expression)
+        self.detail_check.setChecked(self.settings.detail)
         self._garment_path = self.settings.garment_image
         if self._garment_path:
             self.garment_label.setText(Path(self._garment_path).name)
@@ -1159,6 +1168,7 @@ class MainWindow(QMainWindow):
         self.settings.reference_image = self._reference_path
         self.settings.studio_background = self.studio_check.isChecked()
         self.settings.keep_expression = self.mouth_check.isChecked()
+        self.settings.detail = self.detail_check.isChecked()
         self.settings.tryon = self.tryon_check.isChecked()
         self.settings.garment_image = self._garment_path
         self.settings.fast_mode = self.fast_check.isChecked()
@@ -1189,6 +1199,8 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(self, "NVIDIA GPU required", problem)
                 return
         needed = list(models.CORE_KEYS)
+        if settings.detail:
+            needed += list(models.DETAIL_KEYS)
         if settings.studio_background:
             needed += list(models.STUDIO_KEYS)
         if settings.mode == "local" and models.missing(needed):
@@ -1256,6 +1268,7 @@ class MainWindow(QMainWindow):
                     fps=settings.fps,
                     on_log=self.bridge.log.emit,
                     keep_expression=settings.keep_expression,
+                    detail=settings.detail,
                     studio_background=settings.studio_background,
                     studio_image=(self._reference_path or None)
                     if settings.studio_background else None,

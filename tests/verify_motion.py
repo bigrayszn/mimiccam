@@ -287,6 +287,8 @@ def main() -> int:
     parser.add_argument("--target", default="", help="photo standing in for the webcam")
     parser.add_argument("--frames", type=int, default=48, help="frames per motion take")
     parser.add_argument("--save-frames", action="store_true")
+    parser.add_argument("--detail", action="store_true",
+                        help="run the GFPGAN detail pass the engine now ships on")
     args = parser.parse_args()
 
     absent = models.missing()
@@ -328,6 +330,7 @@ def main() -> int:
         height=HEIGHT,
         fps=30,
         on_log=lambda message: print(f"  engine| {message}"),
+        detail=args.detail,
     )
     started = time.perf_counter()
     engine.start()

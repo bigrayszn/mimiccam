@@ -207,6 +207,38 @@ that read as fake even when the geometry is perfect. Both are fixed the same way
 - Cost: **+0.4 ms** a frame (4.8 vs 4.4 ms per paste, measured at 1280x720).
 - Switchable in the app: *Keep my mouth and eyes (real expression)*, on by default.
 
+### Detail
+
+The render is 128 px by construction, so pasting it at webcam scale leaves a soft
+face next to a sharp room. The optional Detail pass closes that with **GFPGAN v1.4**
+(Apache-2.0, 340 MB, downloaded only when the option is on):
+
+- It runs on **every second render**, not on every frame: **~44 ms** of the same GPU
+  the detector uses, so running it on each 13 Hz refresh cost more than it paid.
+  The paste still follows the live pose at full rate; only the fine detail refreshes
+  at 6-9 Hz.
+- The enhanced texture is **pasted at 512 px**, not shrunk back to 128. Shrinking it
+  throws the detail away again: measured on a real photo pair, a 512 paste is
+  **3.4x sharper** in the face region (Laplacian variance 10.3 -> 35.1), a 256 paste
+  only 1.15x, and a downscale back to 128 restores 7%.
+- What it costs: **38 -> 41 ms** a frame and **26.6 -> 24.7 fps** at 720p on the 4070
+  laptop (paste 2.6 -> 3.5 ms, the rest GPU contention with YuNet). That is below the
+  25 fps bar `tests/verify_local.py` sets for itself, so a `--detail` run of that
+  harness reports one failure on that check; everything else in it, and the whole
+  motion harness, passes.
+- It rebuilds eyes, lashes, brows and skin texture from the crop's own pixels rather
+  than inventing a different face: identity on the motion harness is
+  0.558/0.540/0.545/0.567 against 0.566/0.533/0.552/0.552 across still/pan/zoom/roll,
+  all above its 0.50 floor. It is a judgement call, not a free win: GFPGAN sharpens
+  the render's own smears into hard edges too, and a brow can come out drawn-on where
+  the 128 px render was a smudge.
+- Its ONNX wants **BGR in `[-1, 1]`**; feeding it RGB turned skin orange on the first
+  test.
+- The first frame after the face appears is enhanced too, on the frame thread's
+  inline render path: otherwise the face visibly settles a moment after it appears.
+- Switchable: *Sharper face (GFPGAN detail)*, on by default. The licence survey behind
+  the choice is in [FACE_ENHANCERS.md](FACE_ENHANCERS.md).
+
 ### Body and arms
 
 A 128 px face network only owns the face; the neck, chest and arms keep the
@@ -287,11 +319,13 @@ Models are fetched from the official sources, size-checked, and never bundled:
 | `inswapper_128.onnx` | 128x128 swap network | 528 MB | InsightFace, non-commercial research |
 | `rvm_mobilenetv3_fp32.onnx` | person matte (Robust Video Matting) - studio background only | 15 MB | GPL-3.0 |
 | `lama_fp32.onnx` | erases the reference person from the room - studio background only | 208 MB | Apache-2.0 (trained on Places2, CC-BY 4.0) |
+| `gfpgan_1.4.onnx` | restores detail in the swapped face - Detail pass only | 340 MB | Apache-2.0 (trained on FFHQ, CC BY-NC-SA 4.0) |
 
 The two studio models are only downloaded when you tick the room background, and
 the matte is what makes the composite flicker-free: RVM carries recurrent state
 between frames, so hair and a still shoulder keep a steady alpha instead of
-crawling.
+crawling. The Detail model is likewise fetched only when *Sharper face* is on,
+so a first run that leaves it off stays at 540 MB.
 
 That InsightFace licence is the real constraint here: personal projects are fine, a paid
 product is not without a commercial agreement from InsightFace. The app says so

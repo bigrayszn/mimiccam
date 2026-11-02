@@ -44,6 +44,11 @@ POSE_HOLD_S = 0.40
 # hard-swapping them pops. A 0.6/0.4 mix keeps the detail moving without the
 # face flickering between two renders.
 TEXTURE_BLEND = 0.60
+# Run GFPGAN on every second render. It costs ~44 ms of the same GPU the
+# detector uses: on every 13 Hz refresh the engine measured 23.6 fps against
+# 26.6, and halving the cadence recovers 24.7. The paste follows the live pose
+# either way, so detail refreshing at ~9 Hz still moves at frame rate.
+DETAIL_EVERY = 2
 # 720 px keeps landmarks precise enough to place the paste without eating a
 # third of the frame budget: 960 measured 12 ms, 640 measured 5 ms, 720 lands at
 # ~7 ms in the engine's four-thread configuration. FaceDetector can refine each
@@ -90,6 +95,7 @@ class LocalEngine(Engine):
         max_faces: int = 1,
         body_pass: bool = True,
         keep_expression: bool = True,
+        detail: bool = True,
         studio_background: bool = False,
         studio_image: Optional[str] = None,
         matte_every: int = MATTE_EVERY,
@@ -108,6 +114,12 @@ class LocalEngine(Engine):
         self.body_pass = body_pass
         # Lips and eyes come from the camera, everything else from the render.
         self.keep_expression = bool(keep_expression)
+        # Restore detail in the rendered texture (GFPGAN): ~44 ms per call on a
+        # 4070, so on every second render, never on a pasted frame.
+        self.detail = bool(detail)
+        self._enhancer: Optional[face.FaceEnhancer] = None
+        self._enhance_warned = False
+        self._detail_tick = 0
         self.studio_background = bool(studio_background)
         # Defaults to the character photo: the room and the person come from
         # the same reference unless the user picks a separate room.
@@ -268,6 +280,7 @@ class LocalEngine(Engine):
         self._swapper = face.FaceSwapper(
             models.path("swapper"), self.providers, keep_expression=self.keep_expression
         )
+        self._load_enhancer()
         self._provider = self._swapper.session.get_providers()[0]
         if self._strict_gpu and self._provider != "DmlExecutionProvider":
             raise LocalEngineError(
@@ -398,10 +411,26 @@ class LocalEngine(Engine):
                 continue
             frame, landmarks = pending
             try:
-                texture = self._swapper.render(frame, landmarks, self._embedding)
+                rendered = self._swapper.render(frame, landmarks, self._embedding)
             except Exception as exc:  # noqa: BLE001 - keep the feed alive
                 self._log(f"Render failed: {exc}")
                 continue
+            enhance = (self._enhancer is not None
+                       and self._detail_tick % DETAIL_EVERY == 0)
+            self._detail_tick += 1
+            if enhance:
+                texture = self._apply_detail(rendered)
+            elif self._enhancer is not None:
+                # Keep the sharper texture for the render that was skipped: the
+                # pose is corrected at paste time, so this is one detail refresh
+                # behind, not one frame behind.
+                previous, _ = self._current_texture()
+                size = self._enhancer.SIZE
+                texture = (previous if previous is not None
+                           and previous.shape == (size, size, 3)
+                           else rendered)
+            else:
+                texture = rendered
             self._store_texture(texture)
             self.texture_refreshes += 1
 
@@ -469,6 +498,38 @@ class LocalEngine(Engine):
                 or (time.perf_counter() - ts) > 0.5):
             return texture
         return cv2.addWeighted(old, 1.0 - TEXTURE_BLEND, texture, TEXTURE_BLEND, 0.0)
+
+    def _load_enhancer(self) -> None:
+        """Open GFPGAN if the Detail pass is on and its file is installed."""
+        self._enhancer = None
+        if not self.detail:
+            return
+        if not models.present("enhancer"):
+            self._log("Detail pass skipped: gfpgan_1.4.onnx is not installed")
+            return
+        try:
+            self._enhancer = face.FaceEnhancer(models.path("enhancer"), self.providers)
+            self._log("Detail pass: GFPGAN 1.4 sharpens every render")
+        except Exception as exc:  # noqa: BLE001 - the swap still works without it
+            self._log(f"Detail pass unavailable: {exc}")
+
+    def _apply_detail(self, texture: np.ndarray) -> np.ndarray:
+        """Sharpen a fresh render with GFPGAN, or hand back the raw render.
+
+        Both render paths call this. Enhancing only the render thread's output
+        would make the first frame show a soft face that sharpens a moment
+        later - a visible settle right when the character appears.
+        """
+        if self._enhancer is None:
+            return texture
+        try:
+            return self._enhancer.enhance(texture)
+        except Exception as exc:  # noqa: BLE001 - detail is optional
+            if not self._enhance_warned:
+                self._enhance_warned = True
+                self._log(f"Detail pass failed, using the raw render: {exc}")
+            self._enhancer = None
+            return texture
 
     def _store_texture(self, texture: np.ndarray) -> None:
         with self._texture_lock:
@@ -562,9 +623,8 @@ class LocalEngine(Engine):
                 if stale:
                     # First face, or it just came back: render once inline so the
                     # user never sees their own face where the character's should be.
-                    texture = self._blend_texture(
-                        self._swapper.render(bgr, landmarks, self._embedding)
-                    )
+                    render = self._swapper.render(bgr, landmarks, self._embedding)
+                    texture = self._blend_texture(self._apply_detail(render))
                     self._store_texture(texture)
                     self.texture_refreshes += 1
                 else:

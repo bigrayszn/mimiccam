@@ -63,6 +63,9 @@ class Settings:
     # network tracks neither, so without this the character never blinks and
     # their lips stop matching what is being said.
     keep_expression: bool = True
+    # Restore detail in the rendered face with GFPGAN (~44 ms per render, one
+    # 340 MB model).
+    detail: bool = True
     fast_mode: bool = False
     # Draw the raw camera as a small box over the output preview.
     pip_camera: bool = True

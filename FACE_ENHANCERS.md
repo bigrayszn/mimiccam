@@ -42,9 +42,11 @@ loosest model in it.
 
 - **GFPGAN is 44 ms** at its fixed 512x512 input. At 30 fps a frame is 33 ms, so it
   cannot run on every frame beside the swap network. It fits the *render* cadence
-  instead: the engine already refreshes the swap texture at ~16 Hz and cross-fades
-  it (`TEXTURE_BLEND`), so an enhancer at 6-10 Hz would ride the same path and cost
-  0.26-0.44 of a core-second per second.
+  instead: the engine refreshes the swap texture on its own thread and cross-fades
+  it (`TEXTURE_BLEND`), measured at **23 refreshes/s** without the enhancer and
+  **18/s** with it (the pass itself runs on every second render, about 9 Hz), so
+  it rides the path that already tolerates a slower texture and costs under half a
+  core-second per second.
 - **Real-ESRGAN x4v3 is 6.1 ms** for a 128 px crop, i.e. it fits inside a 33 ms
   frame with room to spare, even every frame.
 - Both take fp32 NCHW. GFPGAN's ONNX expects BGR in `[-1, 1]`: feeding RGB produced
@@ -59,6 +61,14 @@ loosest model in it.
 1. **GFPGAN v1.4** as an optional *Detail* pass, applied to the rendered 128 px
    texture every N-th render and blended like the current texture updates. Apache-2.0
    with attribution, 340 MB in the model registry, ~44 ms each time it runs.
+
+   Shipped as described, with one correction the measurement forced: the enhanced
+   texture has to be **pasted at 512 px**. Downscaling the enhancer's output back to
+   the swap network's 128 px before compositing recovers almost none of the gain -
+   measured 7% more sharpness in the frame - while pasting it as rendered gives
+   **3.4x** (Laplacian variance 10.3 -> 35.1) for 1.7 ms more per frame. Everything
+   that keys off the texture size (the paste transform, the expression masks) scales
+   from it, so this needs no change to the swap network.
 2. **Real-ESRGAN x4v3** if a cheaper, unconditionally safe option is wanted: 4.87 MB,
    BSD-3, 6 ms, sharpening only.
 3. Do **not** ship CodeFormer, GPEN, or any FaceFusion-exported ONNX: the first is

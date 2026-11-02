@@ -194,7 +194,7 @@ def match_tone(texture: np.ndarray, reference: np.ndarray, strength: float = 0.6
 
 def composite(frame_bgr: np.ndarray, texture: np.ndarray, mask: np.ndarray,
               matrix: np.ndarray) -> np.ndarray:
-    """Warp a 128px face texture back onto the frame, inside its own bounding box.
+    """Warp a face texture back onto the frame, inside its own bounding box.
 
     Warping two full 1080p planes costs more than the swap network itself, so
     the paste is clipped to the face's footprint. ``matrix`` is the frame->crop
@@ -592,11 +592,25 @@ def expression_alpha(size: int, landmarks: np.ndarray,
 
 
 def blend_alpha(base: np.ndarray, top: np.ndarray, alpha: np.ndarray) -> np.ndarray:
-    """Put ``top`` over ``base`` where the uint8 ``alpha`` is opaque."""
-    weight = cv2.cvtColor(alpha, cv2.COLOR_GRAY2BGR)
-    front = cv2.multiply(top, weight, scale=1.0 / 255.0)
-    back = cv2.multiply(base, cv2.bitwise_not(weight), scale=1.0 / 255.0)
-    return cv2.add(front, back)
+    """Put ``top`` over ``base`` where the uint8 ``alpha`` is opaque.
+
+    Blended inside the mask's own bounding box only: the lips and eyes cover a
+    few per cent of the texture, so mixing whole 512 px planes to change that
+    few per cent is a millisecond a frame spent on pixels the mask zeroes.
+    """
+    rows = np.flatnonzero(alpha.max(axis=1))
+    cols = np.flatnonzero(alpha.max(axis=0))
+    if rows.size == 0 or cols.size == 0:
+        return base
+    y0, y1 = int(rows[0]), int(rows[-1]) + 1
+    x0, x1 = int(cols[0]), int(cols[-1]) + 1
+    out = base.copy()
+    region = out[y0:y1, x0:x1]
+    weight = cv2.cvtColor(alpha[y0:y1, x0:x1], cv2.COLOR_GRAY2BGR)
+    front = cv2.multiply(top[y0:y1, x0:x1], weight, scale=1.0 / 255.0)
+    back = cv2.multiply(region, cv2.bitwise_not(weight), scale=1.0 / 255.0)
+    cv2.add(front, back, dst=region)
+    return out
 
 
 class FaceSwapper:
@@ -621,6 +635,9 @@ class FaceSwapper:
 
         mask = self._oval_mask(self.size)
         self._mask = mask
+        # Masks for detail-enhanced textures, which are pasted larger than the
+        # network's own 128 px render.
+        self._masks: dict[int, np.ndarray] = {self.size: mask}
 
     def _load_emap(self) -> np.ndarray:
         try:
@@ -685,6 +702,30 @@ class FaceSwapper:
         # normalises its output, which reads as a bright sticker in a dim room.
         return match_tone(texture, aligned)
 
+    def mask_for(self, size: int) -> np.ndarray:
+        """The face-shaped mask for a texture of ``size`` px."""
+        size = int(size)
+        cached = self._masks.get(size)
+        if cached is None:
+            cached = self._oval_mask(size)
+            self._masks[size] = cached
+        return cached
+
+    def matrix_for(self, landmarks: np.ndarray, size: int) -> np.ndarray:
+        """The frame->crop transform for a texture of ``size`` px.
+
+        The 128 px template is what the network renders into; a detail pass
+        returns a larger texture of the same crop, so its transform is that one
+        scaled up. ``norm_matrix(landmarks, size)`` cannot do this job: it only
+        agrees with the 128 template for multiples of 112.
+        """
+        matrix = norm_matrix(landmarks, self.size)
+        if int(size) == self.size:
+            return matrix
+        scale = float(size) / float(self.size)
+        zoom = np.array([[scale, 0.0, 0.0], [0.0, scale, 0.0]], dtype=np.float32)
+        return zoom @ np.vstack([matrix, [0.0, 0.0, 1.0]])
+
     def paste(self, frame_bgr: np.ndarray, texture: np.ndarray,
               landmarks: np.ndarray) -> np.ndarray:
         """Glue a rendered texture onto this frame using *current* landmarks.
@@ -693,12 +734,23 @@ class FaceSwapper:
         rate while the network refreshes the detail a few times a second. The
         mouth is the exception: it is taken from this frame every time, because
         a texture rendered a third of a second ago is already the wrong shape.
+
+        The texture may be the network's own 128 px render or a larger one from
+        the detail pass; the transform, the live crop and the expression masks
+        all follow its size, so both land on the same pixels.
         """
-        matrix = norm_matrix(landmarks, self.size)
+        size = int(texture.shape[0])
+        matrix = self.matrix_for(landmarks, size)
         if self.keep_expression:
-            alpha = expression_alpha(self.size, landmarks, matrix)
+            # Built in the 128 px crop space, which is where the mask geometry
+            # was tuned, then scaled up: a soft oval over the lips does not gain
+            # anything from 512 px of it, and building it there cost 2 ms a
+            # frame (6.6 ms per paste instead of 4.5).
+            alpha = expression_alpha(self.size, landmarks, norm_matrix(landmarks, self.size))
             if alpha is not None:
-                live = crop(frame_bgr, matrix, self.size)
+                if size != self.size:
+                    alpha = cv2.resize(alpha, (size, size), interpolation=cv2.INTER_LINEAR)
+                live = crop(frame_bgr, matrix, size)
                 texture = blend_alpha(texture, live, alpha)
         return self._composite(frame_bgr, texture, matrix)
 
@@ -719,7 +771,60 @@ class FaceSwapper:
 
     def _composite(self, frame_bgr: np.ndarray, texture: np.ndarray,
                    matrix: np.ndarray) -> np.ndarray:
-        return composite(frame_bgr, texture, self._mask, matrix)
+        return composite(frame_bgr, texture, self.mask_for(texture.shape[0]), matrix)
+
+
+class FaceEnhancer:
+    """GFPGAN v1.4 over the swapped 128 px texture.
+
+    inswapper renders 128 px, which is soft once it is pasted at webcam scale.
+    GFPGAN rebuilds eyes, lashes, beard strands and skin texture from that crop
+    without inventing a different face, because the crop already carries the
+    identity it is restoring.
+
+    The ONNX export takes a fixed 512x512 **BGR** tensor in ``[-1, 1]``. RGB was
+    tried first and turned skin orange; the channels are deliberately untouched.
+    Measured 44 ms a call on a 4070 laptop through DirectML, so it runs on the
+    render cadence rather than on every pasted frame.
+    """
+
+    SIZE = 512
+
+    def __init__(self, model_path: str | Path, providers: Optional[list[str]] = None,
+                 session=None) -> None:
+        self.session = session if session is not None else _session(str(model_path), providers)
+        self.input_name = self.session.get_inputs()[0].name
+
+    @classmethod
+    def prepare(cls, texture_bgr: np.ndarray) -> np.ndarray:
+        """BGR swap crop -> the NCHW float blob GFPGAN expects."""
+        big = cv2.resize(texture_bgr, (cls.SIZE, cls.SIZE), interpolation=cv2.INTER_CUBIC)
+        scaled = big.astype(np.float32) / 255.0
+        scaled = (scaled - 0.5) / 0.5
+        return np.ascontiguousarray(scaled.transpose(2, 0, 1)[None])
+
+    @classmethod
+    def restore(cls, output: np.ndarray) -> np.ndarray:
+        """Network output -> a BGR texture at the enhancer's own resolution.
+
+        Deliberately *not* shrunk back to 128: shrinking throws away every
+        pixel GFPGAN just invented, and the paste can use the larger texture
+        directly (``FaceSwapper.paste`` scales its transform to the texture).
+        """
+        return np.clip((output[0].transpose(1, 2, 0) + 1.0) * 127.5,
+                       0, 255).astype(np.uint8)
+
+    def enhance(self, texture_bgr: np.ndarray) -> np.ndarray:
+        """Return a sharper, larger texture, or the input if the graph misbehaves."""
+        blob = self.prepare(texture_bgr)
+        output = self.session.run(None, {self.input_name: blob})[0]
+        texture = self.restore(output)
+        if texture.shape[:2] != (self.SIZE, self.SIZE):
+            return texture_bgr
+        if float(texture.std()) < 1.0:
+            # A graph that returns a flat plane has failed, not enhanced.
+            return texture_bgr
+        return texture
 
 
 # -- helpers ---------------------------------------------------------------

@@ -1,7 +1,9 @@
 # Third-party notices
 
-MimicCam is distributed under GPL-2.0-or-later. It depends on the following
-projects; include their license texts in any binary release.
+MimicCam is distributed under GPL-2.0-or-later; the "or later" clause is what
+makes the Apache-2.0 GFPGAN row below compatible, and GPL-3.0 is the version
+that is actually taken. It depends on the following projects; include their
+license texts in any binary release.
 
 | Component | License | Notes |
 |---|---|---|
@@ -15,6 +17,7 @@ projects; include their license texts in any binary release.
 | [keyring](https://github.com/jaraco/keyring) | MIT | Windows Credential Manager access. |
 | [Unity Capture](https://github.com/schellingb/UnityCapture) | MIT (filter) / zlib (Unity plugin) | Optional virtual-camera backend for machines without OBS. Not redistributed by this repository; see `installer.iss`. |
 | OBS Studio | GPL-2.0-or-later | Optional external dependency providing the OBS Virtual Camera device. Not redistributed. |
+| [GFPGAN v1.4](https://github.com/TencentARC/GFPGAN) | Apache-2.0 | Optional Detail pass over the swapped face. The release is licensed Apache-2.0 by Tencent; the weights were trained on FFHQ, whose dataset terms are CC BY-NC-SA 4.0. Downloadable, not bundled; see `FACE_ENHANCERS.md`. |
 
 Lucy 2.5 is a hosted model operated by Decart. Using it is subject to Decart's
 terms and pricing; the model weights are not distributed with this project.
