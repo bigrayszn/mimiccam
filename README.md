@@ -515,7 +515,8 @@ No frame ever crosses a thread boundary through a queue: each stage keeps one sl
 - [x] Local fallback engine (InsightFace inswapper) for offline, zero-cost face swap
 - [ ] Landmark tracking via optical flow so detection can run every 3rd frame
 - [ ] Audio-reactive lip sync pass
-- [ ] Signed installer + GitHub Actions release pipeline
+- [x] GitHub Actions build: every push to `main` tests and packages the exe, and a `v*` tag attaches the portable zip to its release
+- [ ] Signed installer
 - [ ] Per-app virtual camera registration check on first run
 
 ## License

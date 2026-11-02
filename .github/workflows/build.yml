@@ -1,11 +1,13 @@
-# GitHub Actions recipe for MimicCam, kept here as a template.
+# Build, test and package MimicCam on every push to main.
 #
-# Copy it to .github/workflows/build.yml in your clone (or paste it into the
-# repository's web editor) to get a Windows build on every push to main and
-# portable zips attached to v* tags. It is not active in this repo because
-# the automation that publishes it has no `workflow` scope.
+# A v* tag additionally attaches the portable zip to that tag's GitHub release,
+# so cutting a release is: bump the version, commit, `git tag v0.1.2`, push the
+# tag.
 #
-#   mkdir -p .github/workflows && cp ci/build-workflow.yml .github/workflows/build.yml
+# The runner has no GPU, no webcam and no OBS virtual camera. The unit tests
+# need none of those, and build.py's smoke test reports the missing DirectShow
+# camera as a skip rather than a failure while still failing if the frozen exe
+# cannot load pyvirtualcam at all.
 
 name: build
 
@@ -39,16 +41,25 @@ jobs:
         run: python -m unittest discover -s tests -v
 
       - name: Check imports
+        # Importing the package must not need a camera, a key or a display.
         run: python -c "import mimiccam, mimiccam.decart_engine, mimiccam.pipeline, mimiccam.ui; print('imports ok')"
 
       - name: Build portable exe
         run: python build.py
 
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum MimicCam-*-portable.zip > SHASUMS256.txt
+          cat SHASUMS256.txt
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: MimicCam-windows-x64
-          path: dist/MimicCam-*-portable.zip
+          path: |
+            dist/MimicCam-*-portable.zip
+            dist/SHASUMS256.txt
           if-no-files-found: error
 
       - name: Attach to release
@@ -57,4 +68,5 @@ jobs:
         with:
           files: |
             dist/MimicCam-*-portable.zip
+            dist/SHASUMS256.txt
           generate_release_notes: true
