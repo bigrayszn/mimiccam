@@ -185,9 +185,14 @@ geometry is perfect. The fix costs about as little as a fix can:
 - Every frame, a feathered ellipse over the lips in the *live* crop is blended
   over the rendered texture - after the render, before the paste, so the lips
   move at frame rate even though the network refreshes a few times a second.
-- Only the lips change: with the mask on, a painted marker on the subject's
-  mouth reaches the output and the rest of the face is untouched (measured mean
-  difference 91.5/255 inside the mouth region, 0.005 everywhere else).
+- Only the lips change: a painted marker on the subject's mouth reaches the
+  output (95% of it at full strength) while the rest of the face is untouched
+  (measured mean difference 91.5/255 inside the mouth region, 0.005 elsewhere).
+- Blended at 50%, because ArcFace reads the mouth as identity. A full copy
+  dropped similarity to the character from **0.767 to 0.491** on
+  `tests/verify_motion.py` - under the engine's own 0.50 floor - while 50% holds
+  **0.602** still and **0.533** with the head moving. A swap that looks like the
+  wrong person is worse than one with stiff lips.
 - Cost: **+0.4 ms** a frame (4.8 vs 4.4 ms per paste, measured at 1280x720).
 - Switchable in the app: *Keep my mouth (accurate lip movement)*, on by default.
 

@@ -491,6 +491,14 @@ class FaceEmbedder:
 
 
 # -- swap ------------------------------------------------------------------
+# How much of the live mouth to carry over. A full copy hands the speaker's own
+# lips to ArcFace, which reads the mouth as identity: on the motion harness
+# (tests/verify_motion.py) similarity to the character fell from 0.767 to 0.491
+# at 1.0 - below the 0.50 the engine requires - and 0.5 holds at 0.602 on a
+# still and 0.533 with the head moving, while still carrying the articulation.
+MOUTH_BLEND = 0.50
+
+
 def mouth_alpha(size: int, landmarks: np.ndarray,
                 matrix: np.ndarray) -> Optional[np.ndarray]:
     """Soft mask over the lips, in the same 128px crop space as the texture.
@@ -524,7 +532,8 @@ def mouth_alpha(size: int, landmarks: np.ndarray,
         mask, (int(round(centre[0])), int(round(centre[1]))), axes, angle, 0, 360, 255, -1
     )
     k = max(3, int(width * 0.30) | 1)
-    return cv2.GaussianBlur(mask, (k, k), 0)
+    soft = cv2.GaussianBlur(mask, (k, k), 0)
+    return cv2.convertScaleAbs(soft, alpha=MOUTH_BLEND)
 
 
 def blend_alpha(base: np.ndarray, top: np.ndarray, alpha: np.ndarray) -> np.ndarray:
