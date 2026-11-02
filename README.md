@@ -173,28 +173,39 @@ the head ellipse, above the eyes. On your reference photo that is about 26% of
 Hair colour, skin tone and head shape then match the character. Clothing and body
 shape do not: that is generative work, and Lucy mode is where it happens.
 
-### The mouth
+### The mouth and eyes
 
-inswapper has no mouth tracking. It renders the character's lips in whatever
-shape the reference photo had, so on a call the face keeps someone else's mouth
-through every sentence - the one artefact that reads as fake even when the
-geometry is perfect. The fix costs about as little as a fix can:
+inswapper tracks neither. It renders the character's lips in whatever shape the
+reference photo had, and its eyes never close, so on a call the face keeps
+someone else's mouth through every sentence and never blinks - the two artefacts
+that read as fake even when the geometry is perfect. Both are fixed the same way:
 
-- The five landmarks already pin the mouth exactly: the two corners give its
-  centre, its width and the roll of the head. No 68- or 106-point model needed.
-- Every frame, a feathered ellipse over the lips in the *live* crop is blended
-  over the rendered texture - after the render, before the paste, so the lips
-  move at frame rate even though the network refreshes a few times a second.
-- Only the lips change: a painted marker on the subject's mouth reaches the
+- The five landmarks already pin the mouth and the eye line: the mouth corners
+  give a centre, a width and the roll of the head, and the two eye points give
+  the interocular span that sizes and tilts both patches. No 68- or 106-point
+  model needed.
+- Every frame, a feathered ellipse over the lips and one over each eye in the
+  *live* crop are blended over the rendered texture - after the render, before
+  the paste, so they move at frame rate even though the network refreshes a few
+  times a second.
+- Only those regions change: a painted marker on the subject's mouth reaches the
   output (95% of it at full strength) while the rest of the face is untouched
   (measured mean difference 91.5/255 inside the mouth region, 0.005 elsewhere).
-- Blended at 50%, because ArcFace reads the mouth as identity. A full copy
-  dropped similarity to the character from **0.767 to 0.491** on
-  `tests/verify_motion.py` - under the engine's own 0.50 floor - while 50% holds
-  **0.602** still and **0.533** with the head moving. A swap that looks like the
-  wrong person is worse than one with stiff lips.
+- The strengths are a compromise, because ArcFace reads the face's *expression*
+  as identity. On `tests/verify_motion.py` (still / pan / zoom / roll):
+
+  | expression pass | identity |
+  |---|---|---|
+  | off | 0.767 / 0.698 / 0.712 / 0.719 |
+  | lips only at 50% | 0.602 / 0.533 / 0.548 / 0.557 |
+  | lips 50% + eyes 50% | 0.553 / **0.460** / 0.525 / 0.514 - fails the 0.50 floor |
+  | **lips 50% + eyes 30% (shipped)** | **0.566 / 0.511 / 0.559 / 0.541** |
+
+  A swap that looks like the wrong person is worse than one with stiff lips, so
+  the eyes carry less than the mouth: enough for a blink to read, not enough to
+  argue with the character.
 - Cost: **+0.4 ms** a frame (4.8 vs 4.4 ms per paste, measured at 1280x720).
-- Switchable in the app: *Keep my mouth (accurate lip movement)*, on by default.
+- Switchable in the app: *Keep my mouth and eyes (real expression)*, on by default.
 
 ### Body and arms
 

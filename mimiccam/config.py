@@ -59,10 +59,10 @@ class Settings:
     # swapping the person. ``prompt`` then describes the garment.
     tryon: bool = False
     garment_image: str = ""
-    # Paste the live mouth back over the swapped face. The swap network has no
-    # mouth tracking, so without this the character's lips stop matching what
-    # is being said.
-    keep_mouth: bool = True
+    # Paste the live eyes and mouth back over the swapped face. The swap
+    # network tracks neither, so without this the character never blinks and
+    # their lips stop matching what is being said.
+    keep_expression: bool = True
     fast_mode: bool = False
     # Draw the raw camera as a small box over the output preview.
     pip_camera: bool = True

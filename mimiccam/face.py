@@ -498,6 +498,13 @@ class FaceEmbedder:
 # still and 0.533 with the head moving, while still carrying the articulation.
 MOUTH_BLEND = 0.50
 
+# Eyes carry expression too: a blink from the render is a blink that never
+# happened. They also carry more identity than the lips - at 0.50 the motion
+# harness fell to 0.460 while panning, below the 0.50 the engine requires,
+# because ArcFace aligns on the eyes. 0.30 holds at 0.511 and still darkens the
+# lids enough for a blink to read.
+EYE_BLEND = 0.30
+
 
 def mouth_alpha(size: int, landmarks: np.ndarray,
                 matrix: np.ndarray) -> Optional[np.ndarray]:
@@ -536,6 +543,54 @@ def mouth_alpha(size: int, landmarks: np.ndarray,
     return cv2.convertScaleAbs(soft, alpha=MOUTH_BLEND)
 
 
+def eye_alpha(size: int, landmarks: np.ndarray,
+              matrix: np.ndarray) -> Optional[np.ndarray]:
+    """Soft mask over both eyes, in crop space.
+
+    The two eye landmarks give the interocular span, which sets the size and the
+    tilt of both patches - so a head roll moves the eyes with the mouth instead
+    of smearing them. Kept inside the lids: cheeks and brows stay rendered.
+    """
+    points = cv2.transform(
+        np.asarray(landmarks, np.float32).reshape(1, -1, 2), matrix
+    ).reshape(-1, 2)
+    if points.shape[0] < 5:
+        return None
+    left, right = points[0], points[1]
+    span = float(np.hypot(*(right - left)))
+    if not np.isfinite(span) or span < size * 0.10:
+        return None
+    angle = float(np.degrees(np.arctan2(right[1] - left[1], right[0] - left[0])))
+    axes = (max(2, int(span * 0.24)), max(2, int(span * 0.17)))
+    mask = np.zeros((size, size), np.uint8)
+    for eye in (left, right):
+        cv2.ellipse(
+            mask, (int(round(eye[0])), int(round(eye[1]))), axes, angle, 0, 360, 255, -1
+        )
+    k = max(3, int(span * 0.16) | 1)
+    soft = cv2.GaussianBlur(mask, (k, k), 0)
+    return cv2.convertScaleAbs(soft, alpha=EYE_BLEND)
+
+
+def expression_alpha(size: int, landmarks: np.ndarray,
+                     matrix: np.ndarray) -> Optional[np.ndarray]:
+    """Everything that moves when you speak: both eyes and the mouth."""
+    parts = [
+        alpha
+        for alpha in (
+            eye_alpha(size, landmarks, matrix),
+            mouth_alpha(size, landmarks, matrix),
+        )
+        if alpha is not None
+    ]
+    if not parts:
+        return None
+    combined = parts[0]
+    for extra in parts[1:]:
+        combined = cv2.max(combined, extra)
+    return combined
+
+
 def blend_alpha(base: np.ndarray, top: np.ndarray, alpha: np.ndarray) -> np.ndarray:
     """Put ``top`` over ``base`` where the uint8 ``alpha`` is opaque."""
     weight = cv2.cvtColor(alpha, cv2.COLOR_GRAY2BGR)
@@ -554,11 +609,11 @@ class FaceSwapper:
     """
 
     def __init__(self, model_path: str | Path, providers: Optional[list[str]] = None,
-                 keep_mouth: bool = True) -> None:
+                 keep_expression: bool = True) -> None:
         self.model_path = str(model_path)
         self.session = _session(self.model_path, providers)
-        # See mouth_alpha: the lips come from the live frame, not the render.
-        self.keep_mouth = bool(keep_mouth)
+        # See expression_alpha: lips and eyes come from the live frame.
+        self.keep_expression = bool(keep_expression)
         self.input_names = [item.name for item in self.session.get_inputs()]
         shape = self.session.get_inputs()[0].shape
         self.size = int(shape[2] or 128)
@@ -640,8 +695,8 @@ class FaceSwapper:
         a texture rendered a third of a second ago is already the wrong shape.
         """
         matrix = norm_matrix(landmarks, self.size)
-        if self.keep_mouth:
-            alpha = mouth_alpha(self.size, landmarks, matrix)
+        if self.keep_expression:
+            alpha = expression_alpha(self.size, landmarks, matrix)
             if alpha is not None:
                 live = crop(frame_bgr, matrix, self.size)
                 texture = blend_alpha(texture, live, alpha)

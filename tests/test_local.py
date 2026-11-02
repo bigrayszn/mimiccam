@@ -740,5 +740,53 @@ class MouthMaskTests(unittest.TestCase):
         self.assertTrue((out[:, 4:] == 10).all())
 
 
+class ExpressionTests(unittest.TestCase):
+    """Eyes and mouth both come from the camera: the face has to blink."""
+
+    SIZE = 128
+
+    def setUp(self) -> None:
+        self.landmarks = np.array(
+            [
+                [40.0, 46.0], [88.0, 46.0], [64.0, 72.0],
+                [52.0, 96.0], [76.0, 96.0],
+            ],
+            np.float32,
+        )
+        self.matrix = np.eye(2, 3, dtype=np.float32)
+
+    def test_eye_mask_lands_on_the_eyes_only(self) -> None:
+        alpha = face.eye_alpha(self.SIZE, self.landmarks, self.matrix)
+        self.assertIsNotNone(alpha)
+        ys, xs = np.nonzero(alpha > 40)
+        self.assertGreater(ys.size, 20)
+        self.assertLess(float(ys.mean()), 60.0)
+        # Both eyes, not one wide smear between them.
+        self.assertGreater(float(xs.min()), 25.0)
+        self.assertLess(float(xs.max()), 103.0)
+
+    def test_a_blink_filtered_mask_covers_eyes_and_mouth_but_not_the_nose(self) -> None:
+        combined = face.expression_alpha(self.SIZE, self.landmarks, self.matrix)
+        self.assertIsNotNone(combined)
+        self.assertGreater(int(combined[46, 40]), 40)  # left eye
+        self.assertGreater(int(combined[46, 88]), 40)  # right eye
+        self.assertGreater(int(combined[98, 64]), 40)  # below the lip line
+        self.assertLess(int(combined[70, 64]), 40)  # bridge of the nose stays rendered
+
+    def test_a_single_eye_still_gets_a_mask(self) -> None:
+        far_eye = self.landmarks.copy()
+        far_eye[1] = [200.0, 46.0]  # one landmark dragged out of the crop
+        combined = face.expression_alpha(self.SIZE, far_eye, self.matrix)
+        self.assertIsNotNone(combined)
+
+    def test_degenerate_landmarks_return_nothing(self) -> None:
+        squashed = self.landmarks.copy()
+        squashed[1] = squashed[0]
+        self.assertIsNone(face.eye_alpha(self.SIZE, squashed, self.matrix))
+        self.assertIsNone(
+            face.expression_alpha(self.SIZE, np.zeros((2, 2), np.float32), self.matrix)
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
