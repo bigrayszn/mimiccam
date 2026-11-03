@@ -84,7 +84,7 @@ uninstall prompt may still say *Unknown publisher*.
 
 ```bat
 signtool verify /pa /v dist\MimicCam\MimicCam.exe
-signtool verify /pa /v dist\MimicCam-0.2.3-setup.exe
+signtool verify /pa /v dist\MimicCam-0.2.4-setup.exe
 ```
 
 or right-click the file → **Properties → Digital Signatures**.

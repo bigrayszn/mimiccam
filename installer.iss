@@ -8,7 +8,7 @@
 ; https://github.com/bigrayszn/mimiccam - GPL-2.0-or-later.
 
 #define AppName "MimicCam"
-#define AppVersion "0.2.3"
+#define AppVersion "0.2.4"
 #define AppPublisher "Ray Bekson (bigrayszn)"
 #define AppUrl "https://github.com/bigrayszn/mimiccam"
 #define AppExe "MimicCam.exe"

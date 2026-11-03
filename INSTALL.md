@@ -1,4 +1,4 @@
-# MimicCam 0.2.3 — install and use
+# MimicCam 0.2.4 — install and use
 
 **MimicCam © 2026 Ray Bekson (bigrayszn)** — <https://github.com/bigrayszn/mimiccam>.
 Open source under GPL-2.0-or-later; the copyright stays with Ray Bekson.
@@ -72,7 +72,7 @@ the default in this build.
 ## 2. Install (recommended: the setup program)
 
 1. Go to the **Releases** page of this repository and download
-   **`MimicCam-0.2.3-setup.exe`** (or the portable zip from the same release).
+   **`MimicCam-0.2.4-setup.exe`** (or the portable zip from the same release).
 2. Double-click it. Windows SmartScreen will say *"Windows protected your PC"*
    because the build is not code-signed — choose **More info → Run anyway**.
 3. Accept the licence (GPL-2.0-or-later), keep the default folder
@@ -89,7 +89,7 @@ already picks a short per-user location for this reason.
 
 ### Alternative: portable ZIP
 
-Download **`MimicCam-0.2.3-win64-portable.zip`**, extract it to a **short** path such
+Download **`MimicCam-0.2.4-win64-portable.zip`**, extract it to a **short** path such
 as `C:\MimicCam`, and run `C:\MimicCam\MimicCam.exe`. Nothing is written to the
 registry; settings and downloaded models live in `%APPDATA%\MimicCam`.
 

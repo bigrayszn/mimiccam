@@ -360,6 +360,17 @@ def sign(path: Path) -> bool:
     return verify_signature(path)
 
 
+# The licence, the copyright statement and the name policy have to travel with the
+# download. The installer ships them; this puts the same files beside the exe so the
+# portable zip does too.
+def copy_paperwork(folder: Path) -> None:
+    for name in ("LICENSE", "NOTICE", "COPYRIGHT.md", "TRADEMARK.md", "THIRD_PARTY_NOTICES.md"):
+        source = ROOT / name
+        if source.exists():
+            shutil.copy2(source, folder / name)
+    print(f"Paperwork: LICENSE, NOTICE, COPYRIGHT.md, TRADEMARK.md and THIRD_PARTY_NOTICES.md copied beside the exe")
+
+
 def build_portable() -> Path:
     ensure_pyinstaller()
     if (DIST / "MimicCam").exists():
@@ -374,6 +385,7 @@ def build_portable() -> Path:
     if not sign(exe):
         print("  (the portable zip below contains an unsigned exe)")
     smoke_test(exe)
+    copy_paperwork(exe.parent)
 
     archive = DIST / f"MimicCam-{__version__}-win64-portable"
     if Path(f"{archive}.zip").exists():
