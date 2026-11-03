@@ -784,11 +784,11 @@ No frame ever crosses a thread boundary through a queue: each stage keeps one sl
 
 **MimicCam © 2026 Ray Bekson (bigrayszn)** — <https://github.com/bigrayszn/mimiccam>.
 
-**GPL-2.0-or-later.** The full terms are in [LICENSE](LICENSE), and the copyright
-notice at the top of that file is the authoritative statement of authorship: the
-project, its name and its original source are Ray Bekson's. GPL-2.0 means you may
-run, study, share and modify it, and that any copy or derivative you distribute has
-to keep that notice and say what you changed — it does not move the copyright.
+**GPL-2.0-or-later.** [LICENSE](LICENSE) is the verbatim licence; [COPYRIGHT.md](COPYRIGHT.md)
+is the authoritative statement of authorship: the project, its name and its original
+source are Ray Bekson's. GPL-2.0 means you may run, study, share and modify it, and
+that any copy or derivative you distribute has to keep that notice and say what you
+changed — it does not move the copyright.
 
 The app links [pyvirtualcam](https://github.com/letmaik/pyvirtualcam) (GPL-2.0), so distributed binaries are GPL-2.0 as a whole. Other dependencies: Decart SDK (MIT), LiveKit (Apache-2.0), PySide6 (LGPL-3.0), OpenCV (Apache-2.0), NumPy (BSD-3-Clause). Third-party notices belong in your release bundle.
 

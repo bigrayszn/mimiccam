@@ -1,30 +1,3 @@
-MimicCam - real-time face and full-body character swap that shows up as a
-normal webcam in Zoom, Teams, Meet and OBS.
-
-Copyright (C) 2026 Ray Bekson (bigrayszn)
-<https://github.com/bigrayszn/mimiccam>
-
-MimicCam is free software: you can redistribute it and/or modify it under the
-terms of the GNU General Public License as published by the Free Software
-Foundation, either version 2 of the License, or (at your option) any later
-version.
-
-MimicCam is distributed in the hope that it will be useful, but WITHOUT ANY
-WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR
-A PARTICULAR PURPOSE.  See the GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License along with
-this program.  If not, see <https://www.gnu.org/licenses/>.
-
-Third-party components keep their own licences and copyrights; see
-THIRD_PARTY_NOTICES.md. "MimicCam" and this project's original source are the
-work of Ray Bekson (bigrayszn) and nothing in this repository transfers that
-authorship to anyone else.
-
-The full licence text follows.
-
---------------------------------------------------------------------------------
-
                     GNU GENERAL PUBLIC LICENSE
                        Version 2, June 1991
 

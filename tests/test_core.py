@@ -30,11 +30,18 @@ class OwnershipTests(unittest.TestCase):
         self.assertEqual(mimiccam.__url__, "https://github.com/bigrayszn/mimiccam")
         self.assertEqual(mimiccam.__license__, "GPL-2.0-or-later")
 
-    def test_the_licence_file_opens_with_the_copyright(self) -> None:
+    def test_the_copyright_notice_names_ray_bekson(self) -> None:
+        text = (Path(__file__).resolve().parents[1] / "COPYRIGHT.md").read_text(encoding="utf-8")
+        self.assertIn("Ray Bekson", text)
+        self.assertIn("bigrayszn/mimiccam", text)
+        self.assertIn("GPL-2.0-or-later", text)
+
+    def test_the_licence_file_is_the_verbatim_gpl(self) -> None:
+        # No preamble: GitHub only declares "GPL-2.0" on the repository when the
+        # file starts with the licence itself. The copyright lives in COPYRIGHT.md.
         text = (Path(__file__).resolve().parents[1] / "LICENSE").read_text(encoding="utf-8")
-        head = text.split("GNU GENERAL PUBLIC LICENSE")[0]
-        self.assertIn("Ray Bekson", head)
-        self.assertIn("bigrayszn", head)
+        self.assertTrue(text.lstrip().startswith("GNU GENERAL PUBLIC LICENSE"))
+        self.assertNotIn("Ray Bekson", text)
 
     def test_version_flag_prints_the_owner(self) -> None:
         import contextlib
