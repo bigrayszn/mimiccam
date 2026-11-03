@@ -8,7 +8,7 @@ Copyright (C) 2026 Ray Bekson (bigrayszn) - https://github.com/bigrayszn/mimicca
 GPL-2.0-or-later.
 """
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"
 __app_name__ = "MimicCam"
 
 # The project and its copyright are Ray Bekson's (GitHub: bigrayszn). The licence

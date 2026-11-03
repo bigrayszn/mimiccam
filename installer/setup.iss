@@ -1,4 +1,4 @@
-; MimicCam 0.2.1 - single-file setup
+; MimicCam 0.2.2 - single-file setup
 ; MimicCam and its source are Copyright (C) 2026 Ray Bekson (bigrayszn),
 ; https://github.com/bigrayszn/mimiccam - GPL-2.0-or-later.
 ; Builds one .exe that carries the portable build, all five ONNX models, the
@@ -9,7 +9,7 @@
 ; Optional:      iscc /O"out dir" setup.iss
 
 #define AppName        "MimicCam"
-#define AppVersion     "0.2.1"
+#define AppVersion     "0.2.2"
 #define AppPublisher   "Ray Bekson (bigrayszn)"
 #define AppUrl         "https://github.com/bigrayszn/mimiccam"
 #define AppExe         "MimicCam.exe"
@@ -25,7 +25,7 @@ AppName={#AppName}
 AppVersion={#AppVersion}
 AppVerName={#AppName} {#AppVersion}
 AppPublisher={#AppPublisher}
-VersionInfoVersion=0.2.1.0
+VersionInfoVersion=0.2.2.0
 VersionInfoDescription={#AppName} setup
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
