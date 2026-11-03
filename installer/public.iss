@@ -1,4 +1,4 @@
-; MimicCam 0.1.1 - installer for public release.
+; MimicCam 0.2.0 - installer for public release.
 ;
 ; Unlike installer\setup.iss this one carries the application only: no ONNX
 ; models, no character photos, no settings. The models (~908 MB) download once
@@ -11,7 +11,7 @@
 ;   iscc /O"C:\MimicCam-dist4\release" installer\public.iss
 
 #define AppName        "MimicCam"
-#define AppVersion     "0.1.1"
+#define AppVersion     "0.2.0"
 #define AppPublisher   "MimicCam contributors"
 #define AppExe         "MimicCam.exe"
 #define AppSource      "C:\MimicCam-dist4\MimicCam"
@@ -23,7 +23,7 @@ AppName={#AppName}
 AppVersion={#AppVersion}
 AppVerName={#AppName} {#AppVersion}
 AppPublisher={#AppPublisher}
-VersionInfoVersion=0.1.1.0
+VersionInfoVersion=0.2.0.0
 VersionInfoDescription={#AppName} setup
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}

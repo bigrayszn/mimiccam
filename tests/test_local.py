@@ -373,6 +373,44 @@ class HairPassTests(unittest.TestCase):
         self.assertTrue(np.array_equal(pass_.apply(live, tiny), live))
 
 
+class RatioChoiceTests(unittest.TestCase):
+    """How hard the matte works, without a model or a session."""
+
+    def test_a_lit_room_keeps_the_cheap_pass(self) -> None:
+        from mimiccam import matte
+
+        choice = matte.RatioChoice()
+        for _ in range(200):
+            self.assertEqual(choice.update(dark=False), matte.DOWNSAMPLE_RATIO)
+
+    def test_a_dark_room_earns_the_fine_pass_after_a_few_frames(self) -> None:
+        from mimiccam import matte
+
+        choice = matte.RatioChoice(dark_frames=4)
+        for _ in range(3):
+            self.assertEqual(choice.update(dark=True), matte.DOWNSAMPLE_RATIO)
+        self.assertEqual(choice.update(dark=True), matte.DETAIL_RATIO)
+
+    def test_one_bright_frame_does_not_switch_back(self) -> None:
+        from mimiccam import matte
+
+        choice = matte.RatioChoice(dark_frames=2, light_frames=10)
+        choice.update(dark=True)
+        choice.update(dark=True)
+        self.assertEqual(choice.ratio, matte.DETAIL_RATIO)
+        for _ in range(9):
+            self.assertEqual(choice.update(dark=False), matte.DETAIL_RATIO)
+        self.assertEqual(choice.update(dark=False), matte.DOWNSAMPLE_RATIO)
+
+    def test_a_flicker_never_settles_on_either(self) -> None:
+        from mimiccam import matte
+
+        choice = matte.RatioChoice(dark_frames=4, light_frames=4)
+        for _ in range(50):
+            self.assertEqual(choice.update(dark=True), matte.DOWNSAMPLE_RATIO)
+            self.assertEqual(choice.update(dark=False), matte.DOWNSAMPLE_RATIO)
+
+
 class MatteTests(unittest.TestCase):
     def test_refine_trims_the_uncertain_rim(self) -> None:
         from mimiccam import matte

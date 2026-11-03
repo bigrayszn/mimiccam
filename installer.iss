@@ -3,7 +3,7 @@
 ; Then compile:                     iscc installer.iss
 
 #define AppName "MimicCam"
-#define AppVersion "0.1.1"
+#define AppVersion "0.2.0"
 #define AppPublisher "MimicCam contributors"
 #define AppUrl "https://github.com/your-org/mimiccam"
 #define AppExe "MimicCam.exe"

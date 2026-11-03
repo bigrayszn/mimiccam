@@ -7,8 +7,10 @@ moves their chroma and brightness toward the tone of the *swapped* face, so the
 body reads as one person.
 
 It deliberately does not touch clothing: recolouring a shirt without knowing
-where the shirt ends produces blotches. That is a generative job, not a colour
-transform, and the honest place for it is Lucy mode.
+where the shirt ends produces blotches. Clothes are handled by
+``wardrobe.py``, which transplants the garment from the character photo and
+dyes what is left of the live clothing toward it - both of them inside this
+module's skin mask and the person matte.
 
 Colour maths is in CIELAB (perceptually uniform), the mask is YCrCb skin
 detection (cheap and stable on webcam footage), and both are feathered so the

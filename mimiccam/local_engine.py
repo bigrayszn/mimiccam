@@ -9,6 +9,11 @@ session with three small on-device networks:
 * the swap network renders your face wearing that identity at 128x128, which is
   glued back on with a soft face mask.
 
+A dark or backlit frame is lifted with a gamma curve before either of the first
+two looks at it (``exposure.py``). Without that, a face at luma 35 was tracked,
+swapped and published as a near-silhouette in which the character could not be
+seen at all.
+
 Two threads share the work. The render thread runs the swap network as fast as
 the GPU allows (~16 swaps a second on a laptop 4070 through DirectML); the frame
 thread detects landmarks every frame and re-projects the newest texture through
@@ -30,7 +35,7 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from . import body, face, gpu, hair, looks, matte as matting, models, studio
+from . import body, exposure, face, gpu, hair, looks, matte as matting, models, studio, wardrobe
 from .engine import Engine
 
 TEXTURE_TTL_S = 1.0
@@ -97,6 +102,7 @@ class LocalEngine(Engine):
         body_pass: bool = True,
         keep_expression: bool = True,
         detail: bool = True,
+        body_swap: bool = False,
         studio_background: bool = False,
         studio_image: Optional[str] = None,
         matte_every: int = MATTE_EVERY,
@@ -118,6 +124,11 @@ class LocalEngine(Engine):
         # Restore detail in the rendered texture (GFPGAN): ~44 ms per call on a
         # 4070, so on every second render, never on a pasted frame.
         self.detail = bool(detail)
+        # Wear the character's clothes: the reference photo's garment is scaled
+        # to the live face and composited inside the person's matte. ~3 ms a
+        # frame plus the matte the room composite already pays for.
+        self.body_swap = bool(body_swap)
+        self._wardrobe = None
         self._enhancer: Optional[face.FaceEnhancer] = None
         self._enhance_warned = False
         self._detail_tick = 0
@@ -131,6 +142,11 @@ class LocalEngine(Engine):
         self.matte_every = max(1, int(matte_every))
         self._matte_tick = 0
         self._matte: Optional[matting.MatteModel] = None
+        # How hard the matte works, chosen from the light: a backlit room drops
+        # the body from the coarse pass entirely (torso alpha 0.38 vs 0.86 in the
+        # fine one), and a lit room is right at the cheap setting already.
+        self._ratio_choice = matting.RatioChoice()
+        self._fine_matte_noted = False
         self._studio: Optional[studio.StudioScene] = None
         self._last_face_box: Optional[tuple[int, int, int, int]] = None
         self._last_landmarks: Optional[np.ndarray] = None
@@ -193,6 +209,10 @@ class LocalEngine(Engine):
         self.frames_swapped = 0
         self.frames_no_face = 0
         self.texture_refreshes = 0
+        # Lifts an underexposed face before the swap sees it. A backlit subject
+        # at luma 35 was tracked, swapped and published as a near-silhouette.
+        self._normaliser = exposure.Normaliser()
+        self._low_light_noted = False
         self._latency_ms = 0.0
         self._fps = 0.0
         self._render_fps = 0.0
@@ -263,6 +283,11 @@ class LocalEngine(Engine):
     def provider(self) -> str:
         return self._provider
 
+    @property
+    def exposure_lifts(self) -> int:
+        """Frames this session had to brighten for the face to be usable."""
+        return self._normaliser.lifts
+
     # -- setup -------------------------------------------------------------
     def _setup(self) -> None:
         started = time.perf_counter()
@@ -327,6 +352,8 @@ class LocalEngine(Engine):
                 self.swapping = True
                 height, width = photo.shape[:2]
                 self._log(f"Character locked from {self.reference_image} ({width}x{height})")
+                if self.body_swap:
+                    self._build_wardrobe(photo, reference_face.box)
             except Exception as exc:  # noqa: BLE001 - reported, not fatal
                 self.swapping = False
                 self._embedding = None
@@ -336,6 +363,42 @@ class LocalEngine(Engine):
                 )
         else:
             self._log("No character image: applying the look without swapping identity")
+
+    def _build_wardrobe(self, photo: np.ndarray, face_box: tuple[int, int, int, int]) -> None:
+        """Cut the character's garment out of the reference photo.
+
+        Needs the person matte, which the room composite also uses: the model is
+        shared, so turning both on costs one mate, not two. The build itself is
+        two model-free measurements (skin, alpha) and one crop.
+        """
+        if not models.present("matte"):
+            self._log("Wardrobe skipped: the person matte model is not installed")
+            return
+        try:
+            if self._matte is None:
+                self._matte = matting.shared(models.path("matte"), ["CPUExecutionProvider"])
+            self._wardrobe = wardrobe.Wardrobe(photo, face_box, self._matte, on_log=self._log)
+            if not self._wardrobe.ready:
+                self._wardrobe = None
+        except Exception as exc:  # noqa: BLE001 - clothes are optional
+            self._wardrobe = None
+            self._log(f"Wardrobe unavailable: {exc}")
+
+    def _dress(self, frame_bgr: np.ndarray, face_box: tuple[int, int, int, int]) -> np.ndarray:
+        """Composite the character's clothes, reusing or refreshing the matte."""
+        if self._wardrobe is None or self._matte is None:
+            return frame_bgr
+        alpha, _edge, ts = self._current_matte()
+        age = time.perf_counter() - ts if ts else 0.0
+        if alpha is None or age > 0.5:
+            # Same policy as the room composite: the matte thread normally keeps
+            # this fresh, and the inline pass only covers a thread that has not
+            # produced anything for half a second.
+            alpha, edge = self._matte.matte(frame_bgr)
+            with self._matte_out_lock:
+                self._matte_out = (alpha, edge)
+                self._matte_out_ts = time.perf_counter()
+        return self._wardrobe.dress(frame_bgr, face_box, alpha)
 
     def _setup_studio(self) -> None:
         """Build (or load) the reference room and the video matte."""
@@ -386,7 +449,10 @@ class LocalEngine(Engine):
                 target=self._render_loop, name="local-render", daemon=True
             )
             self._render_thread.start()
-        if self._studio is not None and self._matte is not None:
+        if self._matte is not None:
+            # One matte thread serves both the room composite and the wardrobe:
+            # they need the same silhouette and running two would only fight for
+            # the same cores.
             self._matte_thread = threading.Thread(
                 target=self._matte_loop, name="local-matte", daemon=True
             )
@@ -455,13 +521,23 @@ class LocalEngine(Engine):
             if frame is None or self._matte is None:
                 continue
             try:
-                alpha, foreground = self._matte.matte(frame)
+                alpha, foreground = self._matte.matte(frame, ratio=self._ratio_choice.ratio)
             except Exception as exc:  # noqa: BLE001 - keep the feed alive
                 self._log(f"Matte failed: {exc}")
                 continue
             with self._matte_out_lock:
                 self._matte_out = (alpha, foreground)
                 self._matte_out_ts = time.perf_counter()
+
+    def _note_light(self, dark: bool) -> None:
+        """Tell the matte whether the room is too dark for its cheap pass."""
+        ratio = self._ratio_choice.update(dark)
+        if ratio == matting.DETAIL_RATIO and not self._fine_matte_noted:
+            self._fine_matte_noted = True
+            self._log(
+                "Dim room: matting at full detail, because the coarse pass loses the "
+                "body (torso alpha 0.38 -> 0.86 on a backlit frame)"
+            )
 
     def _queue_matte(self, frame_bgr: np.ndarray) -> None:
         if self._matte_thread is None:
@@ -583,7 +659,7 @@ class LocalEngine(Engine):
                                    interpolation=cv2.INTER_AREA)
 
         bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
-        if self._studio is not None and self._matte_thread is not None:
+        if self._matte_thread is not None:
             # Start the matte now so it overlaps detection and the paste.
             if self._matte_tick % self.matte_every == 0:
                 self._queue_matte(bgr)
@@ -591,9 +667,31 @@ class LocalEngine(Engine):
 
         if self._embedding is not None and self._swapper is not None and self._detector is not None:
             detections = self._detector.detect(bgr)
+            if not detections:
+                # A dark room hides the face from YuNet completely (measured: no
+                # detection below roughly 50 luma at its 0.6 threshold), so the
+                # engine fell through to the untouched camera. One cheap second
+                # look at a lifted frame recovers the face instead.
+                retry = self._normaliser.retry_gamma(bgr)
+                if retry is not None:
+                    lifted = self._normaliser.apply(bgr, retry)
+                    detections = self._detector.detect(lifted)
+                    if detections:
+                        bgr = lifted
             if detections:
                 detections.sort(key=lambda d: d.area, reverse=True)
                 face_det = detections[0]
+                # Exposure before the swap sees the face. A gain would clip the
+                # window behind a backlit head; gamma moves only the shadows.
+                bgr,                lifted_gamma = self._normaliser.lift_for_face(bgr, face_det.box)
+                self._note_light(lifted_gamma < 1.0)
+                if lifted_gamma < 1.0 and not self._low_light_noted:
+                    self._low_light_noted = True
+                    self._log(
+                        "Low light: lifting a face at luma "
+                        f"{self._normaliser.last_luma or 0:.0f} "
+                        f"onto {exposure.TARGET_LUMA:.0f} (gamma {lifted_gamma:.2f})"
+                    )
                 # Smooth the transform, not the detection: the paste must follow
                 # the face without inheriting detector jitter. The clock is in
                 # frames, so the filter behaves the same at 20 fps and 30 fps.
@@ -611,6 +709,12 @@ class LocalEngine(Engine):
                 # is what makes the swap look like it is bouncing off.
                 landmarks = self._last_landmarks
                 face_det = None
+                # Hold the exposure too. Lifting only on detected frames made the
+                # picture step between lifted and unlifted while the detector
+                # flickered on a turned head.
+                if self._last_face_box is not None:
+                    bgr, held_gamma = self._normaliser.lift_for_face(bgr, self._last_face_box)
+                    self._note_light(held_gamma < 1.0)
             else:
                 self._smoother.reset()
                 self._last_landmarks = None
@@ -619,6 +723,13 @@ class LocalEngine(Engine):
 
             self._paste_landmarks = None if landmarks is None else landmarks.copy()
             if landmarks is not None:
+                if self._wardrobe is not None:
+                    # Clothes before the face: the garment's own outline reaches
+                    # a little above the chin, and the swapped face belongs on
+                    # top of it.
+                    box = face_det.box if face_det is not None else self._last_face_box
+                    if box is not None:
+                        bgr = self._dress(bgr, box)
                 texture, texture_ts = self._current_texture()
                 stale = texture is None or (time.perf_counter() - texture_ts) > TEXTURE_TTL_S
                 if stale:

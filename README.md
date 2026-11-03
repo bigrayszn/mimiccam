@@ -2,13 +2,13 @@
 
 **Real-time face and full-body character swap that shows up in Zoom, Telegram, WhatsApp and OBS as a normal webcam.** Windows, open source. The free engine runs on any DirectX 12 GPU; Lucy mode needs NVIDIA.
 
-> **Download (Windows, free):** [MimicCam 0.1.1](https://github.com/bigrayszn/mimiccam/releases/latest) — `MimicCam-0.1.1-setup.exe`, or the portable `.zip`.
+> **Download (Windows, free):** [MimicCam 0.2.0](https://github.com/bigrayszn/mimiccam/releases/latest) — `MimicCam-0.2.0-setup.exe`, or the portable `.zip`. Older releases stay on the [releases page](https://github.com/bigrayszn/mimiccam/releases).
 > **Install and use:** [INSTALL.md](INSTALL.md) — requirements, the Decart key, the OBS virtual camera, call-app setup and a troubleshooting table.
 > **No install wanted?** Every line of the app is in this repository: `pip install -r requirements.txt` then `python -m mimiccam`.
 
 MimicCam has two engines behind one virtual camera:
 
-- **Local (free, offline, default)** - a small identity-swap model runs on your own GPU. No API key, no subscription, no network after a one-time model download. It swaps the **face** (plus the character's hair and skin tone); it cannot change your clothes or body - that is a generative video model, not a 128 px face network.
+- **Local (free, offline, default)** - a small identity-swap model runs on your own GPU. No API key, no subscription, no network after a one-time model download. It swaps the **face** (plus the character's hair and skin tone), and can transplant the character's **clothes** onto your own silhouette if you ask it to; it cannot change your body shape - that is a generative video model, not a 128 px face network.
 - **Lucy 2.5 (paid)** - [Decart's Lucy 2.5](https://docs.platform.decart.ai/models/realtime/lucy-2.5) realtime video-to-video model over WebRTC. This is the **whole-person** mode: face, hair, body shape and complete outfit, at $0.02/s. See [How Lucy demand is phrased](#how-lucy-demand-is-phrased) - the wording is what makes the clothes change.
 
 Either way your call app sees a webcam called **OBS Virtual Camera** (or **Unity Video Capture**) and never knows the difference.
@@ -249,6 +249,60 @@ face next to a sharp room. The optional Detail pass closes that with **GFPGAN v1
 - Switchable: *Sharper face (GFPGAN detail)*, on by default. The licence survey behind
   the choice is in [FACE_ENHANCERS.md](FACE_ENHANCERS.md).
 
+### Low light
+
+A dim or backlit room does not degrade the free engine gracefully - it removes it.
+Measured on a real webcam in a room lit from behind, the face sat at **luma 35 of
+255** while the wall behind it was already at 255. YuNet found and tracked the face
+(score 0.67-0.82), the swap ran at 16 renders a second, and the published frame
+changed by about **2,000 pixels**: the network returned a face as dark as the one it
+was given, the paste colour-matched it back onto that darkness, and the character
+was effectively invisible. Below roughly **50 luma** YuNet's 0.6 threshold stops
+finding the face at all.
+
+So the engine measures the face before the swap and lifts the frame when it is dark:
+
+- A **gamma curve, not a gain**. A gain pushes the window behind a backlit head
+  further into clipping and destroys the edge that makes the silhouette readable;
+  gamma leaves 0 and 255 alone and moves the shadows, which is where an underexposed
+  face lives. The same 256-entry table is reused until the exposure changes, and
+  applying it to 1280x720 costs **0.5 ms**.
+- The **whole frame** is lifted, not a brightened oval of face: a well-lit face
+  pasted into a dark room looks like a sticker. Detection, the render and the
+  published frame all see the lifted image, which is what makes the character
+  visible rather than darkening it back down.
+- **Target 95, not "as bright as possible"**. Chosen on that real backlit frame by
+  lifting the same image to 80, 95, 110 and 130 and scoring the pasted character:
+  **+0.234, +0.341, +0.268, +0.201**. The two brightest were also visibly washed out.
+- It **costs nothing when it is not needed**, which is the common case: on the same
+  dark input, two alternating rounds measured **32.0 vs 32.0 fps**, 18.9 vs 18.8
+  renders a second and **14 vs 14 ms** of latency with the lift on and off. A face at
+  95 luma or above is returned untouched.
+- When nothing is detected *and* the frame is dark, detection is retried once on a
+  lifted copy. That path is a guard rather than a measured win: a synthetically
+  darkened portrait cannot prove it, because quantising a bright photo down to luma
+  50 and lifting it again destroys the gradients the detector uses, so the 720 px
+  pass keeps failing where the original succeeded.
+- No switch. It engages only when the measured face is below **95 luma**; there is
+  no separate option to turn on, because the only alternative behaviour is the
+  invisible swap above. Offsets are in [exposure.py](mimiccam/exposure.py).
+- The **matte** gets a second gear in the same room. Robust Video Matting's
+  `downsample_ratio` is what decides how much of the frame its encoder reads, and
+  the shipped 0.25 drops a backlit body almost completely: on the real frame (face
+  at luma 23) the torso came out at alpha **0.38** at 0.25, **0.47** at 0.5 and
+  **0.86** at 1.0, for 16 / 25 / 67 ms on the CPU session. A dark room now gets the
+  fine pass after four dark frames and a lit room keeps the cheap one (30 frames of
+  hysteresis, so a flickering exposure does not keep resetting RVM's recurrent
+  state). In the live loop on that frame the wardrobe went from torso alpha **0.47
+  to 0.89** - the suit's shoulders and both lapels appear - at **31.7 vs 32.0 fps**
+  and 25 vs 27 ms of latency, because the matte has its own thread and the spare
+  time was already there. Offsets in [matte.py](mimiccam/matte.py).
+
+![the same backlit frame, coarse matte on the left and fine matte on the right](dark_room_matte.jpg)
+
+*Left: the coarse pass, where the suit arrives as a strip. Right: the fine pass, with
+the shoulders, both lapels and the tie.*
+
 ### Body and arms
 
 A 128 px face network only owns the face; the neck, chest and arms keep the
@@ -268,6 +322,52 @@ colour transform.
 Presets map to deterministic colour work (`neutral`, `studio`, `cinematic`, `cel`),
 not to hallucinated content: a local renderer that claims to turn you into an anime
 character would be lying. Switch to Lucy for that.
+
+### Wearing the character's clothes
+
+**Wear the character's clothes** takes the body pass one step further: instead of
+only matching skin, it transplants the garment out of the character photo.
+
+- The reference is matted once at setup (RVM), and the torso is cut out of it:
+everything below the chin, minus the face and hair, minus skin. What is left is
+cloth - jacket, shirt, tie, lapel pin, whatever the character is wearing.
+- Per frame that patch is fitted onto your **torso**, not onto your face: the
+reference's own silhouette gives a quad (shoulder row and a row a face-and-a-half
+below the chin, with the width of each), your live matte gives the same quad, and a
+least-squares affine maps one onto the other. Lean or step sideways and the clothes
+go with the body - measured on a real frame with the torso shifted 70 px, the collar
+landed **141 px** off when pinned to the face and **18 px** off when tracked. Both
+rows are placed in face heights rather than at the bottom of each picture, because a
+portrait runs to the knees and a webcam frame stops at the waist; an affine is used
+instead of a homography because the garment runs past its anchor quad and a
+projective map extrapolates past its corners explosively. When the silhouette below
+the chin is unusable - dark room, arms across the chest, nobody there - it falls
+back to scaling by the ratio of the two **face widths** and anchoring the chins
+only. Either way the paste is composited inside your own matte, so hands, arms and
+neck stay yours and keep the character's skin tone from the body pass.
+- Whatever clothing is left outside the pasted outline - your shoulders are wider
+than the character's - is **dyed** toward the garment's colour, with shading kept.
+Without that, a white shirt stayed visible either side of a pasted suit and the
+result looked glued on.
+
+![bare frame, garment pinned to the face, garment tracking the torso](wardrobe_tracking.jpg)
+
+*The same lean, twice: pinned to the face the collar lands 141 px off the body,
+tracked it lands 18 px off. The live frame was shifted 70 px below the chin to make
+the lean; the measurements are in [Measured on this machine](#measured-on-this-machine).*
+- It costs **13 ms of latency and no frame rate**: 32.0 -> 31.7/32.1 fps, render
+refreshes 18.9 -> 17.6/s, 14 -> 27 ms latency in alternating 8 s runs, with the
+garment itself measured at **3.2 ms** a frame once the matte the room composite
+already pays for is in flight. Reading the torso quad off that matte costs another
+**0.6 ms** a frame, so the loop measured **31.5 vs 32.0 fps** with tracking on.
+- What it does **not** do: change your body shape or your pose. The quad follows the
+silhouette, not the skeleton, so a raised arm carries the sleeve with the outline
+rather than bending the elbow, and a turn past about 30 degrees flattens a patch
+that a photo cannot fill back in. Sleeves that follow a moving arm need a
+generative model, and that is still Lucy's job.
+- Its opacity is gated by the person matte: in a room dark enough that RVM only
+reaches alpha 0.43 over the torso, the suit comes through at 43%. Same light as
+above - and the backward assumption is the same as for the face.
 
 ### Sitting in the reference photo's room
 
@@ -343,6 +443,34 @@ before it downloads anything.
 
 Without a character photo the engine still runs and applies the look (a graded
 webcam), which is useful for lighting presets and for checking the pipeline.
+
+### The generative models that would replace all of this, and why they are not here
+
+Two open, Apache-2.0 model families promise exactly what the free engine cannot do -
+change your body and your clothes, not paste a 128 px face. They are worth knowing
+about, and neither can run in this loop on this machine. The numbers are from their
+own deployment documentation, not from a guess:
+
+| | JoyAI-Image (`jd-opensource/JoyAI-Image`) | JoyAI-Video-Edit (`jd-opensource/JoyAI-Video-Edit`) |
+|---|---|---|
+| what it is | 8B MLLM + 16B MMDiT, instruction-guided **image** editing | 16B autoregressive diffusion, **streaming video** editing |
+| weights | 24B, bf16 ~48 GB before any activation | 16B fp8 + causal VAE + an MLLM prompt encoder |
+| measured footprint | CUDA + FlashAttention-3, 1024 px per render | **~21.5 GiB resident, ~28 GiB peak at 480p24** |
+| fastest supported card | datacenter | RTX 5090 32 GB: **840x480 @ 24 fps**; B200: 720p @ 30 |
+| could it feed this engine? | no: one image takes seconds | no: needs 22-28 GB of the 8 GB here |
+| licence | Apache-2.0 | Apache-2.0 |
+
+Viggle (the meme app) is the third link in the same family - motion transfer from a
+driving video - and is a hosted service with no weights to download.
+
+So the honest position: those models are Lucy's job, and Lucy already sells it per
+second. What is missing on an 8 GB laptop is not another model, it is detail - which
+is why the recent work is quad-tracked garment transfer, a second matte gear for dark
+rooms and a torso quad, not a 16B download. Two things from JoyAI are still worth
+having on the list: their **licence** (Apache-2.0 on the whole stack, against a
+non-commercial swapper here) and their **RV2V phrasing** - *"put the coat from Image 1
+on the model in the video"* - which is the same job this app does with a paste and a
+dye, and the same prompt the paid path already uses.
 
 ## Build a downloadable .exe
 
@@ -536,11 +664,21 @@ Every number below came from a real run on an RTX 4070 Laptop, not from reasonin
 | Studio room: relight detail | Laplacian variance of the pasted person **13 -> 484** against a 589 source. The correction used to be computed on a quarter-size copy and interpolated back, which blurred everything pasted into the room |
 | OpenCV worker threads | Capped at **4** (from 32). The engine already runs frame, matte and render threads next to onnxruntime, and the extra workers only fought them: 23 -> 26 fps on the same loop |
 | Frozen `.exe --selftest --studio` | **PASS** - real webcam at 30 fps, room plate from cache, seated at 1.48x, **219-290 frames at 30.0 fps** to the virtual camera, 44-65 ms a frame, no held frames once it was running (the cadence is 30 fps, the newest frame repeats in between) |
+| Pixel-boost tiling (rejected) | Running the 128 px swapper over a tiled 256/384/512 crop, FaceFusion's trick for a bigger face: detail rose 36 -> 56/76/87 (Laplacian variance) at 107/241/430 ms a render, but **identity to the character fell to -0.04/+0.05/-0.08** (from +0.65), and the second fixture pair agreed on that; GFPGAN's shipped pass gets **127** for 76 ms and keeps the character at +0.66. See [FACE_ENHANCERS.md](FACE_ENHANCERS.md) |
 | fp16 swap network (rejected) | 4x faster (13 ms vs 53 ms) and 0.906 correlated - but ArcFace similarity collapsed to -0.072, i.e. the face stopped being the character. Not shipped |
 | Studio room: matte every other frame | **Measured, left off.** +4-10% fps (30.9 -> 34.0 with the subject filling the frame) for a trailing silhouette: 25,900 px/frame differ by more than 8 levels on a 90 px/s sway, and the shirt edge doubles into a ~6 px step at 300 px/s - see `matte_lag_fresh.png` vs `matte_lag_stale.png` |
 | Idle motion tracking (cost control) | **0.058 ms** a frame median, p95 0.105 ms, sampled at 10 Hz - measured with a forced sample on every push. Resizing 720p straight to the 48×27 thumbnail cost **4.5 ms**; striding to every 12th pixel first is what made it cheap |
 | Billing meter | **Server ticks, not estimates** - `generation_tick.seconds` is monotonic, so a late or duplicated tick cannot lower the displayed spend; fast mode is priced at $0.04/s against $0.02/s |
-| Unit tests | **117 passing** (`python -m pytest tests/ -q`), 15 of them for the reference geometry and the prompt builder |
+| Wardrobe: character's clothes on a live frame | **PASS** - 2,244x2,330 px of garment cut from the character photo, pasted inside the live matte: navy suit, shirt, tie and lapel pin landed on the torso; 25,927 px changed on the dark frame at **3.2 ms** a frame |
+| Wardrobe: the clothes follow the body | Torso shifted **70 px** from under the head on the real frame and matte: the collar landed **141 px** off when pinned to the face, **18 px** off when tracking the torso quad; **15,236 px** of the paste moved. On the upright frame tracking versus face-pinning differs in **18,566 px**, same 31.5-32.0 fps |
+| Wardrobe: live loop cost | **32.0 vs 31.7/32.1 fps**, renders 18.9 vs 17.6/s, latency **14 vs 27 ms**, alternating 8 s runs on the same frame |
+| Wardrobe: opacity follows the matte | Person matte averaged **0.43** over the torso in the backlit room and **0.62** when the same frame was lifted; the transplant came through at about that fraction, which is why the light advice applies to the body as well |
+| Low light, real backlit webcam | Face at **luma 35** with the wall at 255: the swap ran and changed **~2,000 px**. With the lift the same frame published at face luma **108**, **815,781 px** changed, identity **+0.341** (targets 80/95/110/130 scored +0.234/+0.341/+0.268/+0.201) |
+| Low light, cost on an identical dark frame | **32.0 vs 32.0 fps**, 18.9 vs 18.8 renders a second, **14 vs 14 ms** latency, lift on vs off, in two alternating 8 s rounds |
+| Low light, gamma table at 1280x720 | **0.5 ms** (`cv2.LUT`, 256-entry table, 4 OpenCV workers) |
+| Low light, matte encoder detail | RVM `downsample_ratio` on the backlit frame, torso alpha: **0.38** at 0.25, **0.47** at 0.5, **0.86** at 1.0 - 16 / 25 / 67 ms on the CPU session. Working size instead of ratio: 768x432 at 0.25 gives 0.60, so the ratio is the knob |
+| Low light, matte in the live loop | Backlit frame through the engine: torso alpha handed to the wardrobe **0.47 -> 0.89**, wardrobe shows the suit's shoulders and both lapels; **31.7 vs 32.0 fps**, 25 vs 27 ms latency, switches after 4 dark frames and back after 30 bright ones |
+| Unit tests | **201 passing** (`python -m pytest tests/ -q`), 15 of them for the reference geometry and the prompt builder, 19 for the low-light lift and the matte's gear choice, 18 for the wardrobe (10 of those on the torso quad and its fallbacks) |
 | NVIDIA gate | RTX 4070 Laptop, 8 GB, driver 610.47 detected; Lucy mode refuses to start without one |
 | Webcam (Integrated Webcam, ASUS laptop) | 1920×1080; gives this build 30 fps where earlier runs got 20, hardware-limited either way. It ignores the requested size, and index 0 is the IR camera |
 | Virtual camera backends detected | `obs` |
@@ -612,6 +750,7 @@ No frame ever crosses a thread boundary through a queue: each stage keeps one sl
 | "No NVIDIA GPU detected" | Install/repair the NVIDIA driver; Lucy mode refuses to pretend it will work. The local engine falls back to whatever DirectML device exists, which will be slow |
 | Local engine: "No face found in that image" | The character photo needs one clear, front-facing face. Cropped screenshots and group photos with tiny faces fail |
 | Local engine runs but nothing changes | No character photo loaded - the engine is only applying the look. Load one, or check the log line "Character locked from ..." |
+| Local engine: the character is barely there, or you are a silhouette | Light your face, not the wall. A backlit face at luma 35 is lifted automatically (log: "Low light: lifting a face at luma ...") but the swap can only build a face out of what the sensor saw - a face in shadow stays soft however much it is lifted |
 | Local engine is choppy | It renders on the GPU at ~19 Hz. Close games/OBS previews and make sure Windows is not running the app on the integrated GPU (Settings → Display → Graphics → MimicCam → High performance) |
 | Model download stalls | Cancel and press Start again - partial files are deleted, so the retry starts clean |
 | Studio room: "needs a reference image" | The room comes from the character photo, so load one first. Without it there is no room to seat you in |

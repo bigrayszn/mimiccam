@@ -5,7 +5,7 @@ Decart's Lucy 2.5 realtime API; the local GPU drives capture, colour conversion,
 decode and the virtual-camera feed.
 """
 
-__version__ = "0.1.1"
+__version__ = "0.2.0"
 __app_name__ = "MimicCam"
 __author__ = "MimicCam contributors"
 __license__ = "GPL-2.0-or-later"

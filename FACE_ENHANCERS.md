@@ -56,6 +56,37 @@ loosest model in it.
   sharpens edges but invents no facial structure - it will amplify inswapper's own
   artefacts as readily as it sharpens them.
 
+## The other way to get detail: pixel boost (rejected)
+
+FaceFusion's answer to the 128 px limit is not an enhancer. It warps the face to a
+larger crop and cuts that crop into 128 px tiles, runs the network on each tile and
+stitches the results back (`processors/pixel_boost.py`). It needs no extra model and
+no extra download, so it was worth measuring against GFPGAN on the same frame, with
+the same character, in both directions of the fixture pair:
+
+| variant | render | renders/s | face detail (Laplacian var) | identity to character |
+|---|---|---|---|---|
+| 128 px, as shipped | 32-33 ms (46 contended) | 30-31 | 36 / 142 | **+0.652 / +0.674** |
+| 128 px + GFPGAN | 76 ms | 13 | **127 / 398** | +0.658 / +0.623 |
+| tiles 2x2 (256) | 107 ms | 9.3 | 56 / 197 | **-0.036 / +0.003** |
+| tiles 3x3 (384) | 241 ms | 4.1 | 76 / 234 | +0.045 / +0.020 |
+| tiles 4x4 (512) | 430 ms | 2.3 | 87 / 279 | -0.082 / -0.004 |
+
+Detail does go up with the tile count, but **the identity collapses to noise**: a
+face at 0.00 is not the character any more, whatever the pixels look like. Each tile
+is a quadrant of a face, so the network is asked to swap something it cannot see in
+full; the embeddings still land, but the geometry it renders is a quadrant's idea of
+a face, and the assembled result is a plausible-looking stranger with visible seams
+along the tile edges.
+
+Against the pass that ships, tiling loses on both axes: **3.2x the render cost of
+the 128 px baseline** (9.2 renders/s instead of 30) buys 1.6x the detail, where
+GFPGAN's 2.3x cost buys **3.5x** the detail and keeps the character. Recorded here
+so it does not get re-tried as an obvious win: it is only an obvious win if you
+never measure the identity. The table above is produced by
+`python tests/verify_pixel_boost.py`, which runs the tiling on the shipped models
+and prints detail, identity and render time side by side with GFPGAN.
+
 ## Recommendation
 
 1. **GFPGAN v1.4** as an optional *Detail* pass, applied to the rendered 128 px

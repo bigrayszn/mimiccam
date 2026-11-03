@@ -32,7 +32,48 @@ import numpy as np
 # blocks when upscaled. The alpha is refined at this size and then snapped to
 # the full-resolution colour guide, which recovers the real edge.
 MATTE_SIZE = (448, 252)
+# How much of the frame the encoder actually reads. This, not the working size,
+# is what decides a backlit room: on the real frame (face at luma 23) the torso
+# came out at alpha 0.38 at 0.25, 0.47 at 0.5 and 0.86 at 1.0, for 16 / 25 / 67
+# ms on the CPU session. The coarse pass is right for a lit room and cheap enough
+# to run every frame; the fine pass is what recovers a body that the coarse pass
+# drops entirely, so it is used only where the room is dark (see RatioChoice).
 DOWNSAMPLE_RATIO = 0.25
+DETAIL_RATIO = 1.0
+# Frames of a given light before the choice changes, so a flickering exposure
+# does not restart the recurrent state every other frame.
+DARK_FRAMES = 4
+LIGHT_FRAMES = 30
+
+
+class RatioChoice:
+    """Encoder detail for the current light, with hysteresis.
+
+    Pure and model-free so the policy can be tested without a session: the
+    switch itself has to reset RVM's recurrent state (its four state tensors are
+    shaped by the ratio), which costs a couple of frames of soft alpha.
+    """
+
+    def __init__(self, dark_frames: int = DARK_FRAMES, light_frames: int = LIGHT_FRAMES) -> None:
+        self.dark_frames = max(1, int(dark_frames))
+        self.light_frames = max(1, int(light_frames))
+        self.ratio = DOWNSAMPLE_RATIO
+        self._dark = 0
+        self._light = 0
+
+    def update(self, dark: bool) -> float:
+        """Feed one frame's verdict, get the ratio to use from here on."""
+        if dark:
+            self._light = 0
+            self._dark += 1
+            if self._dark >= self.dark_frames:
+                self.ratio = DETAIL_RATIO
+        else:
+            self._dark = 0
+            self._light += 1
+            if self._light >= self.light_frames:
+                self.ratio = DOWNSAMPLE_RATIO
+        return self.ratio
 
 
 class MatteModel:
@@ -64,6 +105,7 @@ class MatteModel:
         if "pha" not in outputs:
             raise RuntimeError("matte model has no alpha output ('pha')")
         self._state = self._empty_state()
+        self._ratio = DOWNSAMPLE_RATIO
 
     def _empty_state(self) -> list[np.ndarray]:
         return [np.zeros((1, 1, 1, 1), dtype=np.float32) for _ in range(4)]
@@ -75,7 +117,21 @@ class MatteModel:
     def provider(self) -> str:
         return self.session.get_providers()[0]
 
-    def _run(self, frame_bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    def _use_ratio(self, ratio: Optional[float]) -> float:
+        """Set the encoder detail, resetting the state when it changes.
+
+        RVM's recurrent tensors are sized by the ratio, so a mid-stream change
+        fails inside its Expand node unless the state is dropped first.
+        """
+        wanted = DOWNSAMPLE_RATIO if ratio is None else float(ratio)
+        if wanted != self._ratio:
+            self.reset()
+            self._ratio = wanted
+        return self._ratio
+
+    def _run(self, frame_bgr: np.ndarray,
+             ratio: Optional[float] = None) -> tuple[np.ndarray, np.ndarray]:
+        ratio = self._use_ratio(ratio)
         height, width = frame_bgr.shape[:2]
         small = cv2.resize(frame_bgr, self.size, interpolation=cv2.INTER_AREA)
         blob = cv2.cvtColor(small, cv2.COLOR_BGR2RGB).astype(np.float32)
@@ -88,23 +144,25 @@ class MatteModel:
                 "r2i": self._state[1],
                 "r3i": self._state[2],
                 "r4i": self._state[3],
-                "downsample_ratio": np.array([DOWNSAMPLE_RATIO], dtype=np.float32),
+                "downsample_ratio": np.array([ratio], dtype=np.float32),
             },
         )
         by_name = dict(zip([item.name for item in self.session.get_outputs()], outputs))
         self._state = [by_name[name] for name in ("r1o", "r2o", "r3o", "r4o")]
         return by_name["pha"][0, 0], by_name["fgr"][0]
 
-    def alpha(self, frame_bgr: np.ndarray, refine_alpha: bool = True) -> np.ndarray:
+    def alpha(self, frame_bgr: np.ndarray, refine_alpha: bool = True,
+              ratio: Optional[float] = None) -> np.ndarray:
         """Soft person alpha at the frame's own resolution, values 0..1."""
-        alpha, _foreground = self._run(frame_bgr)
+        alpha, _foreground = self._run(frame_bgr, ratio)
         if refine_alpha:
             # Trim the uncertain rim before upscaling: 1 ms at 512 px instead of
             # 6 ms at 720p, and the guided filter below keeps it soft.
             alpha = refine(alpha, feather=0.4)
         return guided_upsample(alpha, frame_bgr)
 
-    def matte(self, frame_bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    def matte(self, frame_bgr: np.ndarray,
+              ratio: Optional[float] = None) -> tuple[np.ndarray, np.ndarray]:
         """Alpha plus the person's own colours under the soft rim.
 
         The second image is the frame with every semi-transparent pixel replaced
@@ -112,7 +170,7 @@ class MatteModel:
         uses it only along the rim; it is what stops a bright camera wall from
         surviving as a grey fringe on dark hair.
         """
-        alpha, _foreground = self._run(frame_bgr)
+        alpha, _foreground = self._run(frame_bgr, ratio)
         alpha = guided_upsample(refine(alpha, feather=0.4), frame_bgr)
         return alpha, decontaminate(frame_bgr, alpha)
 

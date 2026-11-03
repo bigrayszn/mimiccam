@@ -1,4 +1,4 @@
-; MimicCam 0.1.1 - single-file setup
+; MimicCam 0.2.0 - single-file setup
 ; Builds one .exe that carries the portable build, all five ONNX models, the
 ; character photos, the studio plates and settings. Double-click on the target
 ; PC, no PowerShell and no admin rights.
@@ -7,7 +7,7 @@
 ; Optional:      iscc /O"out dir" setup.iss
 
 #define AppName        "MimicCam"
-#define AppVersion     "0.1.1"
+#define AppVersion     "0.2.0"
 #define AppPublisher   "MimicCam contributors"
 #define AppExe         "MimicCam.exe"
 
@@ -22,7 +22,7 @@ AppName={#AppName}
 AppVersion={#AppVersion}
 AppVerName={#AppName} {#AppVersion}
 AppPublisher={#AppPublisher}
-VersionInfoVersion=0.1.1.0
+VersionInfoVersion=0.2.0.0
 VersionInfoDescription={#AppName} setup
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}

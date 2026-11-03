@@ -54,6 +54,10 @@ class Settings:
     # clothes inside the photo, so a chest-up reference needs this to cover the
     # rest of the body.
     character_notes: str = ""
+    # Wear the character's clothes: the garment in the reference photo is cut
+    # out (person matte, minus face and skin), scaled to the live face and
+    # pasted inside the live silhouette. Free engine only.
+    body_swap: bool = False
     studio_background: bool = False
     # Try-on mode: Lucy replaces the outfit from a garment photo instead of
     # swapping the person. ``prompt`` then describes the garment.

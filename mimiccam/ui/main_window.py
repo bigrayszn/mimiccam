@@ -541,6 +541,18 @@ class MainWindow(QMainWindow):
         )
         char_layout.addWidget(self.detail_check)
 
+        self.body_swap_check = QCheckBox("Wear the character's clothes (from the photo)")
+        self.body_swap_check.setToolTip(
+            "Cuts the garment out of the character photo and fits it to the "
+            "shoulders and waist of your own silhouette, so it leans and shifts "
+            "with you, then pastes it inside that silhouette. Your hands, arms "
+            "and neck stay yours and keep the character's skin tone. It does not "
+            "change your body shape, and a raised arm carries the sleeve with the "
+            "outline rather than bending the elbow - it is a transplant, not a "
+            "generative model."
+        )
+        char_layout.addWidget(self.body_swap_check)
+
         # Try-on is a different Lucy model, not a different prompt: it takes a
         # garment photo and dresses the person in it, so the character image is
         # not used at all.
@@ -651,6 +663,7 @@ class MainWindow(QMainWindow):
         self.studio_check.setChecked(self.settings.studio_background)
         self.mouth_check.setChecked(self.settings.keep_expression)
         self.detail_check.setChecked(self.settings.detail)
+        self.body_swap_check.setChecked(self.settings.body_swap)
         self._garment_path = self.settings.garment_image
         if self._garment_path:
             self.garment_label.setText(Path(self._garment_path).name)
@@ -1169,6 +1182,7 @@ class MainWindow(QMainWindow):
         self.settings.studio_background = self.studio_check.isChecked()
         self.settings.keep_expression = self.mouth_check.isChecked()
         self.settings.detail = self.detail_check.isChecked()
+        self.settings.body_swap = self.body_swap_check.isChecked()
         self.settings.tryon = self.tryon_check.isChecked()
         self.settings.garment_image = self._garment_path
         self.settings.fast_mode = self.fast_check.isChecked()
@@ -1269,6 +1283,7 @@ class MainWindow(QMainWindow):
                     on_log=self.bridge.log.emit,
                     keep_expression=settings.keep_expression,
                     detail=settings.detail,
+                    body_swap=settings.body_swap,
                     studio_background=settings.studio_background,
                     studio_image=(self._reference_path or None)
                     if settings.studio_background else None,
