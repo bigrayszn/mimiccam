@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Ray Bekson (bigrayszn) <https://github.com/bigrayszn/mimiccam>
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Measure what a stale person matte costs at the hairline.
 
 ``MATTE_EVERY`` in the engine can halve the matte thread's work by queueing a

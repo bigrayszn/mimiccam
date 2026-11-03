@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Ray Bekson (bigrayszn) <https://github.com/bigrayszn/mimiccam>
+# SPDX-License-Identifier: GPL-2.0-or-later
 # Build, test and package MimicCam on every push to main.
 #
 # A v* tag additionally attaches the portable zip to that tag's GitHub release,

@@ -1,0 +1,26 @@
+MimicCam
+Copyright (C) 2026 Ray Bekson (bigrayszn)
+https://github.com/bigrayszn/mimiccam
+
+This product includes software developed by Ray Bekson.
+
+MimicCam is free software under the GNU General Public License, version 2 or
+later; the full terms are in the LICENSE file next to this one. You may run,
+study, share and modify it. If you distribute it, or anything built from it, you
+must:
+
+  - keep this NOTICE, the LICENSE and the COPYRIGHT.md statement with the copy;
+  - keep the copyright and licence notices in the source files;
+  - make the corresponding source available;
+  - state that you changed it, and what you changed.
+
+The copyright, and the authorship it records, stay with Ray Bekson. A fork is a
+fork of his work and has to say so.
+
+The name MimicCam, the app icon and the author's name and handle are not granted
+by the software licence. A modified build must be renamed and use its own icon;
+see TRADEMARK.md. Do not present a modified build as the original and do not use
+Ray Bekson's name to endorse it.
+
+Bundled and downloaded third-party components keep their own copyrights and
+licences; they are listed in THIRD_PARTY_NOTICES.md and are not claimed here.

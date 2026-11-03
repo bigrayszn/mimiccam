@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Ray Bekson (bigrayszn) <https://github.com/bigrayszn/mimiccam>
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Wear the character photo's clothes, not just their face.
 
 The body pass moves skin tone; it deliberately leaves clothing alone, because

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Ray Bekson (bigrayszn) <https://github.com/bigrayszn/mimiccam>
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Pixel boost vs the Detail pass, measured on one frame.
 
 FaceFusion gets a larger face out of a 128 px network without a second model: it

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Ray Bekson (bigrayszn) <https://github.com/bigrayszn/mimiccam>
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Credit maths for the paid engine.
 
 Decart bills realtime video per second of active generation and publishes no

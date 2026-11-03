@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Ray Bekson (bigrayszn) <https://github.com/bigrayszn/mimiccam>
+# SPDX-License-Identifier: GPL-2.0-or-later
 """NVIDIA GPU detection and adapter selection.
 
 MimicCam is NVIDIA-only by design: the pipeline assumes a working NVIDIA driver

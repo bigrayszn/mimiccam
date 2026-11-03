@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Ray Bekson (bigrayszn) <https://github.com/bigrayszn/mimiccam>
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Lucy virtual try-on: replace what the person is wearing, from a garment photo.
 
 ``lucy-vton-latest`` is a different realtime model from the character swap. It

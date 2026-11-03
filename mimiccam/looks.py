@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Ray Bekson (bigrayszn) <https://github.com/bigrayszn/mimiccam>
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Deterministic colour looks for the offline engine.
 
 A swap network changes *who* is on camera. These looks change *how* the frame

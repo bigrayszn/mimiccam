@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Ray Bekson (bigrayszn) <https://github.com/bigrayszn/mimiccam>
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Lift an underexposed face before the swap gets hold of it.
 
 The swap network is unforgiving about exposure. Fed a face sitting at luma 35 -

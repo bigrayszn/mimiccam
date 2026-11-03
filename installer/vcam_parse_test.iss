@@ -1,3 +1,5 @@
+; SPDX-FileCopyrightText: 2026 Ray Bekson (bigrayszn) <https://github.com/bigrayszn/mimiccam>
+; SPDX-License-Identifier: GPL-2.0-or-later
 ; Throwaway harness: checks VirtualCameraNames against the strings the app
 ; really prints, without installing anything. Run it with /VERYSILENT /LOG and
 ; read the PASS/FAIL lines out of the log.

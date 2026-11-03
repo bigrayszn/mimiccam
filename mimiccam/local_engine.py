@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Ray Bekson (bigrayszn) <https://github.com/bigrayszn/mimiccam>
+# SPDX-License-Identifier: GPL-2.0-or-later
 """The free engine: the model runs on this machine, not on a server.
 
 This is the "no credits, no subscription" path. It replaces Decart's Lucy 2.5

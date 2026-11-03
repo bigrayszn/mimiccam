@@ -19,6 +19,12 @@ repository still declares "GPL-2.0" rather than an unknown licence). In short:
   present a modified build as the original, and do not use Ray Bekson's name to
   endorse it.
 
+**The name, the icon and the author's identity are governed separately** by
+[TRADEMARK.md](TRADEMARK.md): the GPL covers the code, not the brand. A fork has to be
+renamed; an unmodified official build may keep the name. [NOTICE](NOTICE) is the short
+form every redistribution has to carry, and [SIGNING.md](SIGNING.md) is how the
+published binaries prove who made them.
+
 ## Where this notice appears
 
 | place | what it says |
@@ -32,6 +38,11 @@ repository still declares "GPL-2.0" rather than an unknown licence). In short:
 | `installer/*.iss` | publisher is Ray Bekson (bigrayszn); `AppUrl` is the repository |
 | every GitHub release | the note opens with this notice |
 | the GitHub repository | the description names the author |
+| [NOTICE](NOTICE) | the redistribution terms, shipped inside the installer |
+| [TRADEMARK.md](TRADEMARK.md) | the name, the icon and the author's identity |
+| [SIGNING.md](SIGNING.md) | the publisher certificate that verifies each binary |
+| every source file | `SPDX-FileCopyrightText` + `SPDX-License-Identifier` on the first lines, so the notice survives a file being copied out of the repository |
+| the installed folder | `LICENSE`, `NOTICE`, `COPYRIGHT.md`, `TRADEMARK.md`, `THIRD_PARTY_NOTICES.md` beside the exe |
 
 `tests/test_core.py` asserts the strings above, so a later edit cannot quietly remove
 the attribution.

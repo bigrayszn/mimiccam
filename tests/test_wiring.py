@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Ray Bekson (bigrayszn) <https://github.com/bigrayszn/mimiccam>
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Regression tests for the wiring between the UI, the presets and the engines.
 
 They have to hold on a machine with no camera, no GPU, no API key and no

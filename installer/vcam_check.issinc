@@ -1,3 +1,5 @@
+; SPDX-FileCopyrightText: 2026 Ray Bekson (bigrayszn) <https://github.com/bigrayszn/mimiccam>
+; SPDX-License-Identifier: GPL-2.0-or-later
 // Virtual-camera detection for the MimicCam installer.
 //
 // MimicCam writes frames into a DirectShow camera that must already be

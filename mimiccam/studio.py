@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Ray Bekson (bigrayszn) <https://github.com/bigrayszn/mimiccam>
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Studio background: the reference photo's room, with you in it.
 
 The reference image is a single still: a person seated in a room. Using it as a

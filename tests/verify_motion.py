@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Ray Bekson (bigrayszn) <https://github.com/bigrayszn/mimiccam>
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Motion check for the free engine: does the swap stay glued to the performer?
 
 ``tests/verify_local.py`` answers "is this the right person?" on a still frame.

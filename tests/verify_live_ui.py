@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Ray Bekson (bigrayszn) <https://github.com/bigrayszn/mimiccam>
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Exercise the live screen headlessly and write a picture of it.
 
 The live screen is the part of the window a caller actually looks at: preview,

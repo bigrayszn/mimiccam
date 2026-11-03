@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Ray Bekson (bigrayszn) <https://github.com/bigrayszn/mimiccam>
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Hair: the character's head shape travels with the swapped face.
 
 The 128 px swap network only owns the face inside InsightFace's crop, so the

@@ -1,3 +1,5 @@
+; SPDX-FileCopyrightText: 2026 Ray Bekson (bigrayszn) <https://github.com/bigrayszn/mimiccam>
+; SPDX-License-Identifier: GPL-2.0-or-later
 ; Throwaway harness: exercises the installer's camera auto-pick without
 ; installing anything. Compile and run with /VERYSILENT /LOG, then read the
 ; PASS/FAIL lines out of the log.

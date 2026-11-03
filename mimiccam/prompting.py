@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Ray Bekson (bigrayszn) <https://github.com/bigrayszn/mimiccam>
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Prompt construction for Lucy 2.5.
 
 Decart's own prompting guide is unusually explicit, and every rule below comes

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Ray Bekson (bigrayszn) <https://github.com/bigrayszn/mimiccam>
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Unit tests for the Lucy 2.5 conditioning path.
 
 These are the parts that decide whether a character swap lands as a whole-body

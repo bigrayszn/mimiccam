@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Ray Bekson (bigrayszn) <https://github.com/bigrayszn/mimiccam>
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Fast unit tests that need no camera, no GPU and no network.
 
     python -m unittest discover -s tests -v
@@ -5,10 +7,12 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 import time
 import unittest
+import unittest.mock
 from pathlib import Path
 
 import numpy as np
@@ -55,6 +59,86 @@ class OwnershipTests(unittest.TestCase):
         printed = buffer.getvalue()
         self.assertIn("Ray Bekson", printed)
         self.assertIn("bigrayszn/mimiccam", printed)
+
+    def test_the_name_is_claimed_outside_the_licence(self) -> None:
+        """GPL covers the code; the brand has to be reserved separately."""
+        root = Path(__file__).resolve().parents[1]
+        text = (root / "TRADEMARK.md").read_text(encoding="utf-8")
+        self.assertIn("Ray Bekson", text)
+        self.assertIn("bigrayszn/mimiccam", text)
+        # The licence must not be read as granting the mark.
+        self.assertIn("does not cover the", text)
+        # A fork that changes the app has to rename it.
+        self.assertIn("rename", text.lower())
+        self.assertIn("icon", text)
+
+    def test_every_redistribution_must_carry_the_notice(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        text = (root / "NOTICE").read_text(encoding="utf-8")
+        self.assertIn("Ray Bekson", text)
+        self.assertIn("bigrayszn/mimiccam", text)
+        self.assertIn("TRADEMARK.md", text)
+        self.assertIn("LICENSE", text)
+
+    def test_the_installer_ships_the_ownership_documents(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        text = (root / "installer" / "public.iss").read_text(encoding="utf-8")
+        for name in ("LICENSE", "NOTICE", "COPYRIGHT.md", "TRADEMARK.md"):
+            self.assertIn(name, text, f"the public installer does not ship {name}")
+
+    def test_every_source_file_carries_the_copyright_header(self) -> None:
+        """A file copied out of the repository still says whose it is."""
+        root = Path(__file__).resolve().parents[1]
+        skip = {".git", "build", "dist", "assets", "__pycache__", ".venv"}
+        missing = []
+        for suffix in (".py", ".iss", ".issinc", ".yml", ".bat"):
+            for path in root.rglob(f"*{suffix}"):
+                if skip & set(path.relative_to(root).parts):
+                    continue
+                head = path.read_text(encoding="utf-8", errors="replace").splitlines()[:4]
+                if not any("SPDX-FileCopyrightText: 2026 Ray Bekson" in line for line in head):
+                    missing.append(str(path.relative_to(root)))
+                elif not any("SPDX-License-Identifier: GPL-2.0-or-later" in line for line in head):
+                    missing.append(str(path.relative_to(root)) + " (no licence line)")
+        self.assertEqual(sorted(missing), [])
+
+    def test_the_binaries_carry_the_owner_in_their_version_resource(self) -> None:
+        import build
+
+        text = build.write_version_file().read_text(encoding="utf-8")
+        self.assertIn("CompanyName", text)
+        self.assertIn(build.AUTHOR, text)
+        self.assertIn("LegalCopyright", text)
+        self.assertIn("GPL-2.0-or-later", text)
+
+        import mimiccam
+
+        self.assertIn(mimiccam.__version__, text)
+        self.assertIn("bigrayszn/mimiccam", text)
+
+    def test_signing_is_opt_in_and_reads_the_identity(self) -> None:
+        import build
+
+        clean = {k: v for k, v in os.environ.items() if not k.startswith("MIMICCAM_SIGN")}
+        with unittest.mock.patch.dict(os.environ, clean, clear=True):
+            self.assertIsNone(build.signing_config(), "an unsigned build must stay the default")
+
+        with unittest.mock.patch.dict(
+            os.environ, {"MIMICCAM_SIGN_THUMBPRINT": "ABC123"}, clear=True
+        ):
+            self.assertEqual(build.signing_config()["thumbprint"], "ABC123")
+
+        with unittest.mock.patch.dict(
+            os.environ, {"MIMICCAM_SIGN_COMMAND": "signtool sign /dlib x.dll {file}"}, clear=True
+        ):
+            self.assertIn("{file}", build.signing_config()["command"])
+
+        with unittest.mock.patch.dict(
+            os.environ, {"MIMICCAM_SIGN_PFX": str(Path(tempfile.gettempdir()) / "nope.pfx")},
+            clear=True,
+        ):
+            with self.assertRaises(SystemExit):
+                build.signing_config()
 
 
 class PresetTests(unittest.TestCase):

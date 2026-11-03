@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Ray Bekson (bigrayszn) <https://github.com/bigrayszn/mimiccam>
+# SPDX-License-Identifier: GPL-2.0-or-later
 """MimicCam - real-time character swap that shows up as a webcam.
 
 Open source, NVIDIA-accelerated, Windows-first. The generative model runs on
@@ -8,7 +10,7 @@ Copyright (C) 2026 Ray Bekson (bigrayszn) - https://github.com/bigrayszn/mimicca
 GPL-2.0-or-later.
 """
 
-__version__ = "0.2.2"
+__version__ = "0.2.3"
 __app_name__ = "MimicCam"
 
 # The project and its copyright are Ray Bekson's (GitHub: bigrayszn). The licence

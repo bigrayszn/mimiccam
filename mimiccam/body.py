@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Ray Bekson (bigrayszn) <https://github.com/bigrayszn/mimiccam>
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Body and arm pass: make the visible skin belong to the new face.
 
 A 128 px face network only owns the face. The neck, chest and arms keep the

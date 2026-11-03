@@ -1,4 +1,6 @@
-; MimicCam 0.2.2 - installer for public release.
+; SPDX-FileCopyrightText: 2026 Ray Bekson (bigrayszn) <https://github.com/bigrayszn/mimiccam>
+; SPDX-License-Identifier: GPL-2.0-or-later
+; MimicCam 0.2.3 - installer for public release.
 ; MimicCam and its source are Copyright (C) 2026 Ray Bekson (bigrayszn),
 ; https://github.com/bigrayszn/mimiccam - GPL-2.0-or-later.
 ;
@@ -13,7 +15,7 @@
 ;   iscc /O"C:\MimicCam-dist4\release" installer\public.iss
 
 #define AppName        "MimicCam"
-#define AppVersion     "0.2.2"
+#define AppVersion     "0.2.3"
 #define AppPublisher   "Ray Bekson (bigrayszn)"
 #define AppUrl         "https://github.com/bigrayszn/mimiccam"
 #define AppExe         "MimicCam.exe"
@@ -26,7 +28,7 @@ AppName={#AppName}
 AppVersion={#AppVersion}
 AppVerName={#AppName} {#AppVersion}
 AppPublisher={#AppPublisher}
-VersionInfoVersion=0.2.2.0
+VersionInfoVersion=0.2.3.0
 VersionInfoDescription={#AppName} setup
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
@@ -59,6 +61,11 @@ Source: "{#AppSource}\_internal\*"; DestDir: "{app}\_internal"; Flags: ignorever
 Source: "{#RepoRoot}\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#RepoRoot}\INSTALL.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#RepoRoot}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
+; The ownership documents travel with the install, so a copy found on a machine
+; still says whose it is even when the download is long gone.
+Source: "{#RepoRoot}\NOTICE"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#RepoRoot}\COPYRIGHT.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#RepoRoot}\TRADEMARK.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#RepoRoot}\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]

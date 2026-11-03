@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Ray Bekson (bigrayszn) <https://github.com/bigrayszn/mimiccam>
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Tests for Lucy try-on (``lucy-vton-latest``).
 
 No key, no session, no network: the parts that decide whether the model gets a
