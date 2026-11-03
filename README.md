@@ -2,7 +2,9 @@
 
 **Real-time face and full-body character swap that shows up in Zoom, Telegram, WhatsApp and OBS as a normal webcam.** Windows, open source. The free engine runs on any DirectX 12 GPU; Lucy mode needs NVIDIA.
 
-> **Download (Windows, free):** [MimicCam 0.2.0](https://github.com/bigrayszn/mimiccam/releases/latest) — `MimicCam-0.2.0-setup.exe`, or the portable `.zip`. Older releases stay on the [releases page](https://github.com/bigrayszn/mimiccam/releases).
+> **MimicCam is © 2026 Ray Bekson — [bigrayszn](https://github.com/bigrayszn/mimiccam).** This project, its name and its source are his. It is open source under **GPL-2.0-or-later**: fork it, read it, ship it, but the copyright and the original authorship stay with Ray Bekson. If you see MimicCam anywhere else, this is the repository it came from.
+
+> **Download (Windows, free):** [MimicCam 0.2.1](https://github.com/bigrayszn/mimiccam/releases/latest) — the portable `.zip`, with checksums. Older releases stay on the [releases page](https://github.com/bigrayszn/mimiccam/releases).
 > **Install and use:** [INSTALL.md](INSTALL.md) — requirements, the Decart key, the OBS virtual camera, call-app setup and a troubleshooting table.
 > **No install wanted?** Every line of the app is in this repository: `pip install -r requirements.txt` then `python -m mimiccam`.
 
@@ -639,7 +641,7 @@ Every number below came from a real run on an RTX 4070 Laptop, not from reasonin
 | Readback fidelity | 8×8 luma fingerprint correlation **1.000** with what the app sent, on 3 consecutive runs; brightness matched (78.9 vs 79.1) |
 | Output cadence | 29.8-30.2 fps sustained against a 20 fps camera |
 | Frozen `.exe` (PyInstaller) self-test | **PASS** - 352 frames emitted, 30.0 fps, no held frames |
-| Frozen `.exe` GUI launch | Window appears as *MimicCam 0.1.1*, process stays healthy |
+| Frozen `.exe` GUI launch | Window appears as *MimicCam 0.2.1*, process stays healthy |
 | Decart session plumbing | **PASS** - resolves `lucy-2.5` at 1280×720@30, opens the WebRTC session, surfaces a clean `Invalid API key` for a dummy key and backs off instead of spinning |
 | Reference-image normalisation | 240×160 input -> 909×512 JPEG: padded to 16:9, never cropped, short side >= 512, long side <= 1280 |
 | Lucy 2.5, whole-person swap vs the shipped prompt | 14 s live sessions, same performer (rust T-shirt, tattoos) and same character (black suit). **Shipped prompt:** face moved to the character (0.533) but the torso stayed the source's - dark tailoring **0.05**, colourful **0.60**, i.e. the rust shirt survived. **Whole-person prompt:** face **0.661**, dark tailoring **0.96**, colourful **0.00** - the suit replaced the shirt, the tattoos went with it (`tests/verify_decart.py --live --quality --old-prompt` is the control) |
@@ -778,9 +780,15 @@ No frame ever crosses a thread boundary through a queue: each stage keeps one sl
 - [ ] Signed installer
 - [ ] Per-app virtual camera registration check on first run
 
-## License
+## License and copyright
 
-**GPL-2.0-or-later.** See [LICENSE](LICENSE).
+**MimicCam © 2026 Ray Bekson (bigrayszn)** — <https://github.com/bigrayszn/mimiccam>.
+
+**GPL-2.0-or-later.** The full terms are in [LICENSE](LICENSE), and the copyright
+notice at the top of that file is the authoritative statement of authorship: the
+project, its name and its original source are Ray Bekson's. GPL-2.0 means you may
+run, study, share and modify it, and that any copy or derivative you distribute has
+to keep that notice and say what you changed — it does not move the copyright.
 
 The app links [pyvirtualcam](https://github.com/letmaik/pyvirtualcam) (GPL-2.0), so distributed binaries are GPL-2.0 as a whole. Other dependencies: Decart SDK (MIT), LiveKit (Apache-2.0), PySide6 (LGPL-3.0), OpenCV (Apache-2.0), NumPy (BSD-3-Clause). Third-party notices belong in your release bundle.
 

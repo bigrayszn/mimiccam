@@ -16,6 +16,8 @@ import argparse
 import sys
 import time
 
+from . import __copyright__, __url__, __version__
+
 
 def _list_cameras() -> int:
     from .capture import probe_cameras
@@ -209,6 +211,12 @@ def _selftest(seconds: float, camera: int, mode: str = "passthrough",
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="mimiccam", description="MimicCam")
+    # Says who made it, in the one place a command-line user looks first.
+    parser.add_argument(
+        "--version", action="version",
+        version=f"MimicCam {__version__} - {__copyright__} - GPL-2.0-or-later\n{__url__}",
+        help="print the version, the copyright and the repository, then exit",
+    )
     parser.add_argument("--list-cameras", action="store_true", help="probe cameras and exit")
     parser.add_argument("--list-backends", action="store_true", help="probe virtual cameras and exit")
     parser.add_argument(

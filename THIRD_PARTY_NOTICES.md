@@ -1,5 +1,9 @@
 # Third-party notices
 
+**MimicCam © 2026 Ray Bekson (bigrayszn)** — <https://github.com/bigrayszn/mimiccam>.
+That copyright covers MimicCam itself. The components below keep their own
+licences and copyrights, and nothing here claims them.
+
 MimicCam is distributed under GPL-2.0-or-later; the "or later" clause is what
 makes the Apache-2.0 GFPGAN row below compatible, and GPL-3.0 is the version
 that is actually taken. It depends on the following projects; include their

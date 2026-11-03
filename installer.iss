@@ -1,11 +1,14 @@
 ; MimicCam installer (Inno Setup 6)
 ; Build the portable folder first:  python build.py
 ; Then compile:                     iscc installer.iss
+;
+; MimicCam and its source are Copyright (C) 2026 Ray Bekson (bigrayszn),
+; https://github.com/bigrayszn/mimiccam - GPL-2.0-or-later.
 
 #define AppName "MimicCam"
-#define AppVersion "0.2.0"
-#define AppPublisher "MimicCam contributors"
-#define AppUrl "https://github.com/your-org/mimiccam"
+#define AppVersion "0.2.1"
+#define AppPublisher "Ray Bekson (bigrayszn)"
+#define AppUrl "https://github.com/bigrayszn/mimiccam"
 #define AppExe "MimicCam.exe"
 
 [Setup]

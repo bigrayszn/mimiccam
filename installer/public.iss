@@ -1,4 +1,6 @@
-; MimicCam 0.2.0 - installer for public release.
+; MimicCam 0.2.1 - installer for public release.
+; MimicCam and its source are Copyright (C) 2026 Ray Bekson (bigrayszn),
+; https://github.com/bigrayszn/mimiccam - GPL-2.0-or-later.
 ;
 ; Unlike installer\setup.iss this one carries the application only: no ONNX
 ; models, no character photos, no settings. The models (~908 MB) download once
@@ -11,8 +13,9 @@
 ;   iscc /O"C:\MimicCam-dist4\release" installer\public.iss
 
 #define AppName        "MimicCam"
-#define AppVersion     "0.2.0"
-#define AppPublisher   "MimicCam contributors"
+#define AppVersion     "0.2.1"
+#define AppPublisher   "Ray Bekson (bigrayszn)"
+#define AppUrl         "https://github.com/bigrayszn/mimiccam"
 #define AppExe         "MimicCam.exe"
 #define AppSource      "C:\MimicCam-dist4\MimicCam"
 #define RepoRoot       "C:\Users\offic\.config\freebuff-desktop\local-projects\2ba4c2c9-6ffa-4807-9ee5-adbff78c99c5\threads\caeb8bc427fc350c860c96235c13612bb1302ef149dfac46ec6b405eec76f2a3"
@@ -23,7 +26,7 @@ AppName={#AppName}
 AppVersion={#AppVersion}
 AppVerName={#AppName} {#AppVersion}
 AppPublisher={#AppPublisher}
-VersionInfoVersion=0.2.0.0
+VersionInfoVersion=0.2.1.0
 VersionInfoDescription={#AppName} setup
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}

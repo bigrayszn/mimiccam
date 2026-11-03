@@ -48,7 +48,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import __app_name__, __version__, models, tryon
+from .. import __app_name__, __copyright__, __url__, __version__, models, tryon
 from ..capture import CameraCapture, CameraEntry, probe_cameras
 from ..config import Settings, characters_dir, get_api_key, mask_key, set_api_key
 from ..credits import clock, money, remaining_usd, usd_per_second
@@ -262,6 +262,12 @@ class MainWindow(QMainWindow):
         header.addSpacing(12)
         header.addWidget(self.gpu_label)
         header.addStretch(1)
+        # Whose app this is, in the app. The licence and the repository are in the
+        # tooltip; both come from ``mimiccam.__init__`` so they cannot drift.
+        credit = QLabel(f"{__copyright__}")
+        credit.setObjectName("hint")
+        credit.setToolTip(f"MimicCam, GPL-2.0-or-later.\n{__url__}")
+        header.addWidget(credit)
         outer.addLayout(header)
 
         body = QHBoxLayout()

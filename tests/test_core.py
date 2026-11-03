@@ -19,6 +19,37 @@ from mimiccam import config, credits, presets  # noqa: E402
 from mimiccam.engine import PassthroughEngine  # noqa: E402
 
 
+class OwnershipTests(unittest.TestCase):
+    """Who the project belongs to, in one place, so it cannot drift."""
+
+    def test_the_copyright_names_ray_bekson(self) -> None:
+        import mimiccam
+
+        self.assertIn("Ray Bekson", mimiccam.__copyright__)
+        self.assertIn("bigrayszn", mimiccam.__author__)
+        self.assertEqual(mimiccam.__url__, "https://github.com/bigrayszn/mimiccam")
+        self.assertEqual(mimiccam.__license__, "GPL-2.0-or-later")
+
+    def test_the_licence_file_opens_with_the_copyright(self) -> None:
+        text = (Path(__file__).resolve().parents[1] / "LICENSE").read_text(encoding="utf-8")
+        head = text.split("GNU GENERAL PUBLIC LICENSE")[0]
+        self.assertIn("Ray Bekson", head)
+        self.assertIn("bigrayszn", head)
+
+    def test_version_flag_prints_the_owner(self) -> None:
+        import contextlib
+        import io
+
+        from mimiccam.__main__ import main
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer), self.assertRaises(SystemExit):
+            main(["--version"])
+        printed = buffer.getvalue()
+        self.assertIn("Ray Bekson", printed)
+        self.assertIn("bigrayszn/mimiccam", printed)
+
+
 class PresetTests(unittest.TestCase):
     def test_character_preset_requires_reference(self) -> None:
         preset = presets.get("character")
