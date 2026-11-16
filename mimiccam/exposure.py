@@ -18,13 +18,16 @@ So a dark room does not degrade the swap gracefully; it silently drops it.
 The fix is a gamma lift, not a gain. A gain would push the window behind the
 subject - already at 255 - further into clipping and lose the edge that makes a
 silhouette readable. A gamma curve keeps 0 and 255 where they are and moves only
-the shadows and mid-tones, which is where an underexposed face lives. The lift is
-applied to the whole frame rather than to a brightened patch of face: pasting a
-well-lit oval into a dark room looks exactly like a face-shaped sticker.
+the shadows and mid-tones, which is where an underexposed face lives.
 
-Both the detection and the render see the lifted frame, and the frame that is
-published is the lifted one - "put the result back" has to mean the output, or
-the character is darkened back down by the paste's own colour matching.
+Where the lift lands matters. Lifting the whole frame also lifted the frame that
+got published, and a brightened person in a room that still reads as dim is the
+"pale mask pasted on a dark body" look: the swapped face came out 20 LAB levels
+brighter than the neck under it. So the lift is now confined to what actually
+needs it - the copy of the face crop the swap network looks at (``face.py``
+``brighten_for_network``) and the retry detection on a dark frame. The published
+frame keeps the camera's own exposure, and the swap's tone matching follows the
+unlifted crop, which is what puts the character in the room's real light.
 """
 
 from __future__ import annotations
@@ -148,6 +151,24 @@ class Normaliser:
         if mean >= self.scene_trigger:
             return None
         return self.gamma_for(mean, target=self.scene_target)
+
+    def measure(self, bgr: np.ndarray, box: tuple[int, int, int, int]) -> float:
+        """The gamma this face would need, without touching the frame.
+
+        What the engine wants from the exposure pass now is the *number*: how
+        dark the face is decides the matte detail and the one-line explanation
+        in the log. The brightening itself happens on the network's copy of the
+        crop, so the published frame keeps the camera's exposure.
+        """
+        luma = face_luma(bgr, box)
+        self.last_luma = luma
+        if luma is None:
+            return 1.0
+        gamma = self.gamma_for(luma)
+        if gamma is None:
+            return 1.0
+        self.lifts += 1
+        return gamma
 
     # -- the lift itself ---------------------------------------------------
     def apply(self, bgr: np.ndarray, gamma: float) -> np.ndarray:

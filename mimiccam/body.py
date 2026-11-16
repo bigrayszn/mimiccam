@@ -15,8 +15,9 @@ dyes what is left of the live clothing toward it - both of them inside this
 module's skin mask and the person matte.
 
 Colour maths is in CIELAB (perceptually uniform), the mask is YCrCb skin
-detection (cheap and stable on webcam footage), and both are feathered so the
-transition at the jaw and sleeve edges has no visible seam.
+detection (cheap and stable on webcam footage) backed by a chroma match against
+the face itself, and both are feathered so the transition at the jaw and sleeve
+edges has no visible seam.
 """
 
 from __future__ import annotations
@@ -32,7 +33,12 @@ SKIN_UPPER = np.array([255, 173, 127], dtype=np.uint8)
 
 TORSO_WIDTHS = 3.6      # torso window, as a multiple of the face width
 TORSO_HEIGHTS = 3.0     # how far below the face box to look
-FACE_PAD = 0.18         # ignore skin inside the (slightly grown) face box
+FACE_PAD = 0.08         # ignore skin inside the (slightly grown) face box
+# How far the exclusion fades out, as a fraction of the face width. Zeroing the
+# face box outright left a hard edge just under the jaw: the face above was the
+# character's, the neck below kept the original tone, and the change showed as a
+# blotch along the jawline. Fading the exclusion lets the neck be corrected too.
+FACE_FEATHER = 0.10
 
 
 def _torso_window(shape: tuple[int, int], face_box: tuple[int, int, int, int]):
@@ -50,6 +56,19 @@ def _torso_window(shape: tuple[int, int], face_box: tuple[int, int, int, int]):
 MASK_SCALE = 0.5  # skin is a smooth region; half resolution is plenty
 WORK_SCALE = 4    # grid the body correction is computed on (quarter of the frame)
 
+# Chroma distance (Cr, Cb) from the face's own skin at which a pixel stops
+# counting as that person's skin. The global YCrCb window above is tuned for
+# daylight; in a dim room the neck sits two or three levels outside it (measured
+# Cr 131 against a floor of 133 on a real 1080p frame) and the whole neck was
+# dropped from the mask, which is the paste boundary the body pass exists to
+# hide. The face itself is the reference, so it travels with the lighting and
+# with the character's skin tone.
+CHROMA_TOLERANCE = 14.0
+CHROMA_TRUST = 0.9   # the fallback is softer than a clean global-window hit
+# Skin always carries some chroma. A white shirt and a grey wall sit at Cr 128
+# / Cb 128, which is not far in chroma space from a very pale face.
+CHROMA_FLOOR = 9.0
+
 
 def _resize(image: np.ndarray, size: tuple[int, int]) -> np.ndarray:
     if (image.shape[1], image.shape[0]) == size:
@@ -57,13 +76,34 @@ def _resize(image: np.ndarray, size: tuple[int, int]) -> np.ndarray:
     return cv2.resize(image, size, interpolation=cv2.INTER_LINEAR)
 
 
-def skin_mask(bgr: np.ndarray, scale: float = MASK_SCALE) -> np.ndarray:
+def face_chroma(bgr: np.ndarray, face_box: tuple[int, int, int, int]) -> Optional[np.ndarray]:
+    """Mean (Cr, Cb) of the face — the reference the neck is compared against."""
+    x, y, w, h = face_box
+    height, width = bgr.shape[:2]
+    inset_x, inset_y = int(w * 0.25), int(h * 0.25)
+    patch = bgr[max(0, y + inset_y):min(height, y + h - inset_y),
+                max(0, x + inset_x):min(width, x + w - inset_x)]
+    if patch.size == 0:
+        return None
+    patch = cv2.resize(patch, (max(1, patch.shape[1] // 4), max(1, patch.shape[0] // 4)),
+                       interpolation=cv2.INTER_AREA)
+    chroma = cv2.cvtColor(patch, cv2.COLOR_BGR2YCrCb)[:, :, 1:].astype(np.float32)
+    return chroma.reshape(-1, 2).mean(axis=0)
+
+
+def skin_mask(bgr: np.ndarray, scale: float = MASK_SCALE,
+              reference: Optional[np.ndarray] = None) -> np.ndarray:
     """Soft 0..1 skin probability, computed at half resolution.
 
     The mask only ever modulates a colour gradient, so the extra precision of a
     full-resolution inRange + morphology buys nothing and costs ~3 ms a frame.
     ``scale`` downscales the input first; callers that already work on a coarse
     grid pass 1.0 so the detector keeps its resolution without an extra resize.
+
+    ``reference`` is the face's own (Cr, Cb): pixels within ``CHROMA_TOLERANCE``
+    of it count as the same skin even when the global window rejects them, which
+    is what keeps a neck in dim, cool light inside the mask. The ramp is linear
+    in distance, so this adds no edge of its own.
     """
     height, width = bgr.shape[:2]
     if scale == 1.0:
@@ -75,6 +115,15 @@ def skin_mask(bgr: np.ndarray, scale: float = MASK_SCALE) -> np.ndarray:
     mask = cv2.inRange(ycrcb, SKIN_LOWER, SKIN_UPPER)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     soft = cv2.GaussianBlur(mask, (0, 0), 1.5).astype(np.float32) / 255.0
+    if reference is not None:
+        chroma = ycrcb[:, :, 1:].astype(np.float32)
+        distance = np.linalg.norm(chroma - np.asarray(reference, dtype=np.float32), axis=2)
+        local = np.clip(1.0 - distance / CHROMA_TOLERANCE, 0.0, 1.0)
+        # Coloured light shifts skin chroma but a wall, a shirt or a grey desk
+        # still carries almost none, so require some before trusting the match.
+        saturation = np.abs(chroma - 128.0).max(axis=2)
+        local *= np.clip(saturation / CHROMA_FLOOR, 0.0, 1.0)
+        soft = np.maximum(soft, local * CHROMA_TRUST)
     return _resize(soft, (width, height))
 
 
@@ -82,13 +131,19 @@ def body_mask(bgr: np.ndarray, face_box: tuple[int, int, int, int],
               scale: float = MASK_SCALE, window_div: int = 4) -> np.ndarray:
     """Skin below/around the face: neck, chest, arms and hands, not the face."""
     height, width = bgr.shape[:2]
-    mask = skin_mask(bgr, scale=scale)
+    mask = skin_mask(bgr, scale=scale, reference=face_chroma(bgr, face_box))
 
     x, y, w, h = face_box
     pad_x, pad_y = int(w * FACE_PAD), int(h * FACE_PAD)
     fx0, fy0 = max(0, x - pad_x), max(0, y - pad_y)
     fx1, fy1 = min(width, x + w + pad_x), min(height, y + h + pad_y)
-    mask[fy0:fy1, fx0:fx1] = 0.0
+    # Feather the exclusion instead of cutting it: the correction then reaches
+    # the sliver of neck under the jaw and fades out toward the face, rather
+    # than stopping at a line the eye reads as a blotch.
+    guard = np.zeros(mask.shape, dtype=np.float32)
+    guard[fy0:fy1, fx0:fx1] = 1.0
+    guard = cv2.GaussianBlur(guard, (0, 0), max(1.5, float(w) * FACE_FEATHER))
+    mask *= 1.0 - np.clip(guard, 0.0, 1.0)
 
     # Build the torso window small and blur it small: a 9 px feather on a
     # quarter-size grid is a 36 px gradient on the frame, for a tenth of the cost.
@@ -134,11 +189,18 @@ def harmonize(bgr: np.ndarray, face_box: tuple[int, int, int, int],
     """Shift the body's skin colour toward ``target_lab`` (the swapped face).
 
     The correction is a smooth field, so mask, colour statistics and the LAB
-    maths run on a quarter-resolution grid and the result is interpolated back
-    up. Half resolution cost 14 ms a frame at 720p; this costs about 4 ms and
-    the skin detection keeps its resolution (``scale=1.0``, ``window_div=2``
-    put the skin map on the frame/4 grid and the torso feather on frame/8, the
-    same two grids the half-resolution version used).
+    maths run on a quarter-resolution grid. Half resolution cost 14 ms a frame
+    at 720p; this costs about 3 ms and the skin detection keeps its resolution
+    (``scale=1.0``, ``window_div=2`` put the skin map on the frame/4 grid and
+    the torso feather on frame/8).
+
+    Only the *difference* the correction made is carried back to full size.
+    Writing the quarter-resolution image over the ROI (what this used to do)
+    replaced the neck and chest with a 4x upscale of themselves, which halved
+    the detail in the region: lab-var 11.0 on the source frame, 6.0 after. The
+    offset field is smooth, so upsampling that instead keeps the shirt, the
+    stubble and the skin texture at their own resolution while the colour still
+    ramps out along the jaw exactly as before.
     """
     height, width = bgr.shape[:2]
     left, top, right, bottom = _torso_window((height, width), face_box)
@@ -176,8 +238,15 @@ def harmonize(bgr: np.ndarray, face_box: tuple[int, int, int, int],
     lab[:, :, 0] *= 1.0 + (ratio - 1.0) * blend[:, :, 0]
 
     corrected = cv2.cvtColor(np.clip(lab, 0, 255).astype(np.uint8), cv2.COLOR_LAB2BGR)
+    # int16 difference, upscaled: zero where the mask is zero, so untouched
+    # pixels stay bit-identical and the ROI is never resampled.
+    difference = corrected.astype(np.int16) - small.astype(np.int16)
+    if not difference.any():
+        return bgr
+    grown = cv2.resize(difference, (roi.shape[1], roi.shape[0]), interpolation=cv2.INTER_LINEAR)
     out = bgr.copy()
-    out[y0 * WORK_SCALE:y1 * WORK_SCALE, x0 * WORK_SCALE:x1 * WORK_SCALE] = cv2.resize(
-        corrected, (roi.shape[1], roi.shape[0]), interpolation=cv2.INTER_LINEAR
-    )
+    target = out[y0 * WORK_SCALE:y1 * WORK_SCALE, x0 * WORK_SCALE:x1 * WORK_SCALE]
+    # cv2.add saturates a signed second operand into 8U for us: 1.2 ms on a
+    # 720p ROI, against 4.7 ms for the equivalent int16 add, clip and cast.
+    cv2.add(target, grown, dst=target, dtype=cv2.CV_8U)
     return out

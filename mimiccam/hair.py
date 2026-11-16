@@ -52,7 +52,11 @@ SCALP_CY = 0.50
 TINT = 0.75         # how far the leftover live hair moves toward the pasted hair
 ALPHA = 0.95        # a trace of the live hair through the pasted hair reads as
                     # "same lighting" instead of a wig
-MIN_COVERAGE = 0.004  # less hair than this in the photo: nothing worth pasting
+# Less hair than this in the photo: nothing worth pasting. A mask that only just
+# clears the old 0.4% floor is not a hairstyle, it is noise from the segmentation:
+# warping it puts a dark smudge on the live hairline instead of a head of hair
+# (a long-haired portrait that GrabCut took for background measured 5%).
+MIN_COVERAGE = 0.06
 
 
 def eye_span(landmarks: np.ndarray) -> float:

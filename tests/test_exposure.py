@@ -191,16 +191,23 @@ class EngineLowLightTests(unittest.TestCase):
         engine._enhancer = None
         return engine
 
-    def test_the_swap_and_the_output_see_the_lifted_frame(self) -> None:
+    def test_the_published_frame_keeps_the_camera_exposure(self) -> None:
+        """A dim room stays dim: the lift belongs to the network's own crop.
+
+        Publishing the lifted frame put a bright-swapped face on a dark neck -
+        the pale mask - and washed the whole picture out with it. The swapper
+        brightens its own copy of the crop instead.
+        """
         swapper = _RecordingSwapper()
         engine = self._engine(_FixedDetector(), swapper)
         source = _frame(30)
         out = engine._process(source)
-        # The renderer was handed the brightened frame, not the dark one...
         self.assertEqual(len(swapper.seen), 1)
-        self.assertGreater(float(swapper.seen[0].mean()), 70.0)
-        # ...and so was the frame that gets published.
-        self.assertGreater(float(out.mean()), 70.0)
+        # The engine hands over the frame as the camera gave it...
+        self.assertLess(float(swapper.seen[0].mean()), 40.0)
+        # ...and publishes it that way, apart from the 8x8 stand-in paste.
+        self.assertLess(float(out.mean()), 40.0)
+        # The darkness is still measured, so the log and the matte get it.
         self.assertGreaterEqual(engine.exposure_lifts, 1)
 
     def test_a_dark_run_asks_the_matte_for_the_fine_pass_once(self) -> None:
@@ -247,14 +254,13 @@ class EngineLowLightTests(unittest.TestCase):
         self.assertEqual(detector.calls, 1)
         self.assertEqual(engine.frames_no_face, 1)
 
-    def test_a_held_pose_keeps_the_lift_too(self) -> None:
-        # The pose hold bridges a dropped detection; if it pasted an unlifted
-        # frame the picture would step between bright and dark as the detector
-        # flickered.
+    def test_a_held_pose_keeps_the_exposure_steady(self) -> None:
+        # The pose hold bridges a dropped detection; the exposure must not step
+        # while the detector flickers on a turned head.
         engine = self._engine(_OneShotDetector())
         first = engine._process(_frame(30))
         second = engine._process(_frame(30))
-        self.assertGreater(float(first.mean()), 70.0)
+        self.assertLess(float(first.mean()), 40.0)
         self.assertEqual(int(second[20, 20, 0]), int(first[20, 20, 0]))
         self.assertEqual(engine.frames_no_face, 0)
 
