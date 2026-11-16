@@ -50,10 +50,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import __app_name__, __copyright__, __url__, __version__, models, tryon
-from ..capture import CameraCapture, CameraEntry, probe_cameras
+from .. import __app_name__, __copyright__, __url__, __version__, models, quality, tryon
+from ..capture import CameraCapture, CameraEntry, cached_cameras, scan_cameras
 from ..config import Settings, characters_dir, get_api_key, mask_key, set_api_key
-from ..credits import clock, money, remaining_usd, usd_per_second
+from ..credits import clock, money, remaining_usd
 from ..gpu import describe as describe_gpu
 from ..gpu import nvidia_adapter, nvidia_info, require_nvidia
 from ..local_engine import LocalEngine, LocalEngineError
@@ -190,6 +190,12 @@ class PreviewView(QLabel):
         painter.end()
 
 
+# How many live scans a remembered camera may be missing before it leaves the
+# list for good. Greying keeps a device that is merely unplugged for an evening;
+# a camera nobody has seen for three scans is not coming back.
+CAMERA_FORGET_AFTER = 3
+
+
 class Bridge(QObject):
     """Worker-thread callbacks -> GUI-thread signals."""
 
@@ -219,6 +225,12 @@ class MainWindow(QMainWindow):
         self._idle_ts = 0.0
         self._closing = False
         self._resume_preview_after_scan = False
+        # A scan is already on the camera-probe thread. Opening Settings while
+        # it runs must not start a second sweep of every device.
+        self._scanning = False
+        # Building the window checks the Settings button, which would otherwise
+        # start a scan before the remembered list is even painted.
+        self._built = False
         # Credit accounting. Decart has no balance API, so the balance is the
         # figure the user typed in and MimicCam subtracts what it metered:
         # _spend_base is what earlier runs already took, _run_offset the
@@ -227,6 +239,9 @@ class MainWindow(QMainWindow):
         self._run_usd = 0.0
         self._run_offset = 0.0
         self._last_money_save = 0.0
+        # The price is stated once per launch before the first billed
+        # maximum-quality session; after that the credit box carries it.
+        self._price_shown = False
         self._idle_timer = QTimer(self)
         self._idle_timer.setInterval(66)  # ~15 Hz, same cadence as the live preview
         self._idle_timer.timeout.connect(self._pump_idle_frame)
@@ -236,7 +251,7 @@ class MainWindow(QMainWindow):
         self.bridge.input_preview.connect(self._show_camera_frame)
         self.bridge.log.connect(self._append_log)
         self.bridge.stats.connect(self._update_stats)
-        self.bridge.cameras.connect(self._populate_cameras)
+        self.bridge.cameras.connect(self._scanned_cameras)
 
         self.setWindowTitle(f"{__app_name__} {__version__} - real-time character swap webcam")
         self.resize(self.settings.window_width, self.settings.window_height)
@@ -245,7 +260,23 @@ class MainWindow(QMainWindow):
         self._refresh_credit_box()
 
         QTimer.singleShot(150, self._startup_checks)
+        # Paint the list the last run ended with before scanning: opening every
+        # camera takes seconds, and an empty picker for that long looks like the
+        # app lost the devices. The scan replaces it as soon as it has answers.
+        self._show_remembered_cameras()
+        self._built = True
         self._scan_cameras()
+
+    def _show_remembered_cameras(self) -> None:
+        """Populate the picker from settings before the first scan lands."""
+        remembered = self._remembered_cameras()
+        if remembered:
+            self._populate_cameras(remembered, remember=False)
+            self.bridge.log.emit(
+                "Cameras from the last run: "
+                + ", ".join(entry.label for entry in remembered)
+                + " (checking them now)"
+            )
 
     # -- construction ------------------------------------------------------
     def _build_ui(self) -> None:
@@ -404,7 +435,7 @@ class MainWindow(QMainWindow):
         cam_form.addRow("Device", self.camera_combo)
         row = QHBoxLayout()
         self.refresh_cameras_btn = QPushButton("Refresh")
-        self.refresh_cameras_btn.clicked.connect(self._scan_cameras)
+        self.refresh_cameras_btn.clicked.connect(lambda: self._scan_cameras(force=True))
         self.backend_combo = QComboBox()
         self.backend_combo.addItem("Virtual cam: Auto", "")
         for key, label in BACKEND_LABELS.items():
@@ -428,10 +459,37 @@ class MainWindow(QMainWindow):
             "no API key, no subscription and no network."
         )
 
+        # The one switch that asks for the best picture the app can produce,
+        # with the price on the label. It selects Lucy, the standard tier and no
+        # idle pausing: this is a picture decision, and the bill is stated
+        # rather than discovered.
+        # 313 px at the panel's 13 px Segoe UI - it fits where the older labels
+        # are already clipped, and the wrapped line below carries the rest of
+        # the arithmetic.
+        self.max_check = QCheckBox(
+            f"Maximum quality - Lucy, best picture ({quality.rate_text()})"
+        )
+        self.max_check.setToolTip(
+            "The closest this app gets to a swap nobody spots on a call: Lucy "
+            "re-renders the whole frame, head to toe, at "
+            f"{quality.WIDTH}x{quality.HEIGHT} and {quality.FPS} fps on Decart's "
+            "standard tier. Fast mode bills 2x for the same picture. Idle pausing "
+            "switches your raw camera back on screen, so this mode leaves it off."
+        )
+        mode_layout.addWidget(self.max_check)
+        self.price_label = QLabel(
+            f"{quality.rate_text()} = {money(quality.per_minute() * 60)} an hour"
+            f"  ·  30 min = {money(quality.per_minute() * 30)}"
+        )
+        self.price_label.setObjectName("hint")
+        self.price_label.setWordWrap(True)
+        mode_layout.addWidget(self.price_label)
+        self.max_check.toggled.connect(self._max_quality_toggled)
+
         # Decart's fast tier is a price, not a quality, setting: same output,
         # lower latency, billed at 2x. The label has to say so.
         self.fast_check = QCheckBox(
-            "Fast mode - same picture, lower latency, 2x credits ($0.04/s)"
+            "Fast mode - same picture, lower latency, 2x credits ($2.40/min)"
         )
         self.fast_check.setChecked(self.settings.fast_mode)
         mode_layout.addWidget(self.fast_check)
@@ -442,7 +500,7 @@ class MainWindow(QMainWindow):
         self.pause_check.setChecked(self.settings.pause_when_idle)
         # The credit box quotes the rate for the engine and speed selected here,
         # so it reads right before Start as well as during a call.
-        self.mode_group.buttonToggled.connect(lambda *_args: self._refresh_credit_box())
+        self.mode_group.buttonToggled.connect(lambda *_args: self._mode_changed())
         self.fast_check.toggled.connect(lambda *_args: self._refresh_credit_box())
         self.pause_check.setToolTip(
             "Decart bills per second of active generation and has no pause API, so "
@@ -638,6 +696,11 @@ class MainWindow(QMainWindow):
         else:
             self.radio_passthrough.setChecked(True)
 
+        if self.settings.max_quality:
+            # Restored last: the mode moves the engine to Lucy, and the free
+            # engine's default above must not win over a saved max-quality call.
+            self.max_check.setChecked(True)
+
         if local_ready:
             self.bridge.log.emit("Local models installed - the free engine is ready.")
             adapter = nvidia_adapter()
@@ -698,7 +761,22 @@ class MainWindow(QMainWindow):
             names = ", ".join(BACKEND_LABELS.get(b, b) for b in backends)
             self.bridge.log.emit(f"Virtual camera backend(s) available: {names}")
 
-    def _scan_cameras(self) -> None:
+    def _scan_cameras(self, force: bool = False) -> None:
+        """Fill the picker, from the last scan when it is still good.
+
+        Opening every camera takes seconds and takes the devices away from
+        whatever else is using them, so only Refresh asks for a real scan;
+        opening Settings reuses the answer. A cache hit also leaves the idle
+        preview alone instead of stopping and restarting it for nothing.
+        """
+        if not force:
+            cached = cached_cameras()
+            if cached is not None:
+                self._populate_cameras(cached)
+                return
+        if self._scanning:
+            return
+        self._scanning = True
         # Probing opens every camera in turn, so drop the idle preview first:
         # holding the device would make the probe report our own camera missing.
         self._resume_preview_after_scan = self._idle_cam is not None
@@ -706,7 +784,7 @@ class MainWindow(QMainWindow):
 
         def probe() -> None:
             try:
-                entries = probe_cameras(6)
+                entries = scan_cameras(force=force)
             except Exception as exc:  # noqa: BLE001 - a scan failure must still report
                 self.bridge.log.emit(f"Camera scan failed: {exc}")
                 entries = []
@@ -720,9 +798,90 @@ class MainWindow(QMainWindow):
         if self._idle_cam is not None and not self._running:
             self._start_idle_camera()
 
-    def _populate_cameras(self, entries: list[CameraEntry]) -> None:
+    def _remembered_misses(self) -> dict[str, int]:
+        """How many scans in a row each remembered camera has been missing."""
+        counts: dict[str, int] = {}
+        for item in self.settings.cameras or []:
+            try:
+                key = str(item.get("name", "")).strip().casefold()
+                counts[key] = int(item.get("misses", 0))
+            except (AttributeError, TypeError, ValueError):
+                continue
+        return counts
+
+    def _remembered_cameras(self) -> list[CameraEntry]:
+        """The camera list saved by an earlier run, as entries."""
+        remembered = []
+        for item in self.settings.cameras or []:
+            try:
+                remembered.append(CameraEntry(
+                    index=int(item["index"]),
+                    width=int(item["width"]),
+                    height=int(item["height"]),
+                    mean_luma=float(item["mean_luma"]),
+                    name=str(item.get("name", "")),
+                ))
+            except (KeyError, TypeError, ValueError):
+                continue  # a settings file from an older or edited build
+        return remembered
+
+    def _scanned_cameras(self, entries: list[CameraEntry]) -> None:
+        """A real sweep of the devices came back: the only time one ages out."""
+        self._populate_cameras(entries, remember=True, scanned=True)
+
+    def _populate_cameras(self, entries: list[CameraEntry], remember: bool = True,
+                          scanned: bool = False) -> None:
+        self._scanning = False
+        live = list(entries)
+        # A device that is unplugged right now is still a device the user owns:
+        # keep it in the list, greyed out, instead of making it silently vanish.
+        # Only a real scan can say which is which, so the launch-time population
+        # (remember=False) shows everything as available until the scan lands.
+        #
+        # A camera that stays gone is dropped after CAMERA_FORGET_AFTER real
+        # scans, not after CAMERA_FORGET_AFTER repaints: opening Settings reuses
+        # the cached scan, so counting there would age a camera out early.
+        missing: list[CameraEntry] = []
+        forgotten: list[CameraEntry] = []
+        # Matched by name, not index: DirectShow renumbers its devices when one
+        # is unplugged, so the same camera comes back at a new index and
+        # matching on the old one greyed out cameras that were right there.
+        seen = {entry.name.strip().casefold() for entry in live}
+        counts = self._remembered_misses()
+        # Only a sweep that found something ages the missing: a sweep that came
+        # back empty is a camera in use (or a broken driver), not a camera gone.
+        aging = bool(scanned and live)
+        if remember:
+            for entry in self._remembered_cameras():
+                key = entry.name.strip().casefold()
+                if key in seen:
+                    continue  # plugged in again: its misses start over at zero
+                count = counts.get(key, 0) + (1 if aging else 0)
+                if aging and count >= CAMERA_FORGET_AFTER:
+                    forgotten.append(entry)
+                    continue
+                missing.append(entry)
+                counts[key] = count
+            if aging:
+                self.settings.cameras = [
+                    {"index": entry.index, "name": entry.name, "width": entry.width,
+                     "height": entry.height, "mean_luma": entry.mean_luma,
+                     "misses": 0}
+                    for entry in live
+                ] + [
+                    {"index": entry.index, "name": entry.name, "width": entry.width,
+                     "height": entry.height, "mean_luma": entry.mean_luma,
+                     "misses": counts.get(entry.name.strip().casefold(), 0)}
+                    for entry in missing
+                ]
+                self.settings.save()
+        if forgotten:
+            self.bridge.log.emit(
+                "Forgotten after " + str(CAMERA_FORGET_AFTER) + " scans without them: "
+                + ", ".join(entry.label for entry in forgotten)
+            )
         self.camera_combo.clear()
-        if not entries:
+        if not live and not missing:
             self.camera_combo.addItem("No camera found", -1)
             self.bridge.log.emit(
                 "No camera delivered a single frame. Close any app that is using "
@@ -730,17 +889,47 @@ class MainWindow(QMainWindow):
                 "press Refresh."
             )
             return
-        for entry in entries:
+        for entry in live:
             self.camera_combo.addItem(entry.label, entry.index)
-        preferred = self.settings.camera_index
-        index = self.camera_combo.findData(preferred)
-        lit = next((i for i, entry in enumerate(entries) if entry.mean_luma >= 8), None)
-        if index >= 0 and entries[index].mean_luma < 8 and lit is not None:
+        if missing:
+            model = self.camera_combo.model()
+            for entry in missing:
+                self.camera_combo.addItem(entry.label, entry.index)
+                item = model.item(self.camera_combo.count() - 1)
+                if item is not None:
+                    item.setEnabled(False)
+            self.bridge.log.emit(
+                "Not found right now, greyed out: "
+                + ", ".join(entry.label for entry in missing)
+            )
+        if not live:
+            self.camera_combo.addItem("No camera found", -1)
+            self.bridge.log.emit(
+                "No camera delivered a single frame. Close any app that is using "
+                "the camera (Teams, WhatsApp, OBS preview, another MimicCam) and "
+                "press Refresh."
+            )
+            self.camera_combo.setCurrentIndex(self.camera_combo.count() - 1)
+            return
+        # The name first, the index only as a fallback: DirectShow renumbers its
+        # devices when one is plugged or unplugged, so the saved index can point
+        # at a different camera than the one the user chose.
+        preferred_name = (self.settings.camera_name or "").strip().casefold()
+        index = next(
+            (i for i, entry in enumerate(live)
+             if preferred_name and entry.name.strip().casefold() == preferred_name),
+            -1,
+        )
+        if index < 0:
+            index = next((i for i, entry in enumerate(live)
+                          if entry.index == self.settings.camera_index), -1)
+        lit = next((i for i, entry in enumerate(live) if entry.mean_luma >= 8), None)
+        if index >= 0 and live[index].mean_luma < 8 and lit is not None:
             # The saved device is dark (an IR camera, a covered lens, or a probe
             # that came back empty last time). A lit camera is strictly better.
             self.bridge.log.emit(
-                f"Camera {preferred} currently gives no picture - using "
-                f"camera {entries[lit].index} instead."
+                f"{live[index].label} currently gives no picture - using "
+                f"{live[lit].label} instead."
             )
             index = lit
         elif index < 0:
@@ -748,9 +937,9 @@ class MainWindow(QMainWindow):
             index = lit if lit is not None else 0
         if index >= 0:
             self.camera_combo.setCurrentIndex(index)
-        names = ", ".join(entry.label for entry in entries)
+        names = ", ".join(entry.label for entry in live)
         self.bridge.log.emit(f"Cameras: {names}")
-        if entries[index].mean_luma < 8:
+        if live[index].mean_luma < 8:
             self.bridge.log.emit(
                 "The selected camera is delivering no light. Open the lens cover or "
                 "pick another device above."
@@ -906,6 +1095,7 @@ class MainWindow(QMainWindow):
             self.hint.setText(framing.hint)
         if announce:
             self.bridge.log.emit(f"Reference image: {Path(path).name}")
+        self._apply_character(path)
 
     def _clear_reference(self) -> None:
         self._reference_path = ""
@@ -913,6 +1103,7 @@ class MainWindow(QMainWindow):
         self.thumb.setPixmap(QPixmap())
         self.thumb.setText("no reference")
         self.thumb.setStyleSheet("border: 1px dashed #3a424e; border-radius: 6px; color: #6b7280;")
+        self._apply_character("")
 
     # -- try-on ------------------------------------------------------------
     def _tryon_toggled(self, on: bool) -> None:
@@ -941,6 +1132,40 @@ class MainWindow(QMainWindow):
         """The running Decart engine, or None when nothing is live."""
         pipeline = getattr(self, "pipeline", None)
         return getattr(pipeline, "engine", None) if pipeline else None
+
+    def _live_engine(self):
+        """Whatever engine is running this call, or None."""
+        pipeline = getattr(self, "pipeline", None)
+        return getattr(pipeline, "engine", None) if pipeline else None
+
+    def _apply_character(self, path: str) -> bool:
+        """Push a new character photo into a live call. False when idle.
+
+        Both engines read the photo when they start, so picking a new one used to
+        do nothing until Stop and Start camera: the picture kept the old person
+        while the thumbnail showed the new one.
+        """
+        engine = self._live_engine()
+        if engine is None or not hasattr(engine, "set_reference"):
+            # Passthrough has no character to change: the photo a user picks
+            # while it runs is simply the one the next Start uses.
+            return False
+        if getattr(engine, "try_on", False):
+            self.hint.setText(
+                "Try-on is running: the reference image is the garment. "
+                "Stop first to change the character."
+            )
+            return True
+        try:
+            engine.set_reference(path or None)
+        except Exception as exc:  # noqa: BLE001 - reported, not fatal
+            QMessageBox.warning(self, "Could not change the character", str(exc))
+            return True
+        self.hint.setText(
+            f"New character sent to the call: {Path(path).name}" if path
+            else "Character cleared: the call keeps the look without a new face."
+        )
+        return True
 
     def _pick_garment(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -1023,6 +1248,10 @@ class MainWindow(QMainWindow):
     def _show_settings(self, shown: bool) -> None:
         self.settings_panel.setVisible(shown)
         self.settings_btn.setText("Hide settings" if shown else "Settings")
+        if shown and self._built:
+            # The device list is only worth looking at when it is in front of
+            # the user; a cached answer costs nothing here.
+            self._scan_cameras()
 
     def _save_key(self) -> None:
         value = self.key_edit.text().strip()
@@ -1086,14 +1315,19 @@ class MainWindow(QMainWindow):
         )
         self._refresh_credit_box()
 
-    def _balance_parts(self, run_usd: float) -> list[str]:
+    def _balance_parts(self, run_usd: float, rate_per_min: float = 0.0) -> list[str]:
         spent = self._spend_base + run_usd
         if self.settings.balance_usd <= 0:
             return ["no balance set - add one in Settings"]
         left = remaining_usd(self.settings.balance_usd, spent)
         if left <= 0:
             return [f"<b>$0.00</b> left of {money(self.settings.balance_usd)} - used up"]
-        return [f"<b>{money(left)}</b> left of {money(self.settings.balance_usd)}"]
+        parts = [f"<b>{money(left)}</b> left of {money(self.settings.balance_usd)}"]
+        if rate_per_min > 0:
+            # Dollars are the invoice; minutes are what a person can plan a call
+            # around, so the balance is quoted both ways.
+            parts.append(quality.minutes_text(left / rate_per_min))
+        return parts
 
     def _selected_mode(self) -> str:
         if not hasattr(self, "radio_decart"):
@@ -1106,6 +1340,45 @@ class MainWindow(QMainWindow):
             return "passthrough"
         return self.settings.mode
 
+    def _max_quality_toggled(self, on: bool) -> None:
+        """Maximum quality is a picture decision, and its price is on screen.
+
+        Ticking it selects Lucy and pins the standard tier, because fast mode is
+        a 2x bill for the same picture - it is disabled while this is on, not
+        merely unticked. Idle pausing is switched off too: ending the session
+        puts the raw camera back on screen until something moves, which is a
+        change to what callers see, not only to the bill.
+        """
+        self.settings.max_quality = bool(on)
+        if not on:
+            self.fast_check.setEnabled(True)
+            self._refresh_credit_box()
+            return
+        self.radio_decart.setChecked(True)
+        self.fast_check.setChecked(False)
+        self.fast_check.setEnabled(False)
+        self.pause_check.setChecked(False)
+        if self._running:
+            # A session is billed at the tier it opened with, so the honest thing
+            # is to say when the change lands rather than imply it is live.
+            self.hint.setText(
+                "Maximum quality is set for the next start: this session keeps "
+                "the tier it opened with, and the chip shows the rate it bills."
+            )
+        else:
+            self.hint.setText(
+                f"Maximum quality: {quality.summary()}. "
+                f"{money(quality.per_minute() * 60)} an hour, billed for every "
+                "second the session stays connected. Stop camera ends the meter."
+            )
+        self._refresh_credit_box()
+
+    def _mode_changed(self) -> None:
+        """A mode that is not Lucy cannot be maximum quality."""
+        if self.max_check.isChecked() and not self.radio_decart.isChecked():
+            self.max_check.setChecked(False)
+        self._refresh_credit_box()
+
     def _refresh_credit_box(self) -> None:
         """One line: rate, what this session cost, and what the balance has left.
 
@@ -1115,7 +1388,6 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "credit_box"):
             return
         fast = self.fast_check.isChecked() if hasattr(self, "fast_check") else self.settings.fast_mode
-        rate = usd_per_second(fast)
         mode = self._selected_mode()
         engine = getattr(self.pipeline, "engine", None) if self.pipeline is not None else None
         billing = engine.billing() if hasattr(engine, "billing") else None
@@ -1125,11 +1397,16 @@ class MainWindow(QMainWindow):
             # free engine is running, which bills nothing by definition.
             self._run_usd = 0.0
             if mode == "decart":
-                parts = [f"<b>{money(rate)}/s</b>", "Lucy 2.5 - idle"]
-                parts += self._balance_parts(0.0)
+                rate = quality.per_minute(fast)
+                label = (
+                    "Lucy 2.5 - maximum quality, idle"
+                    if self.max_check.isChecked() else "Lucy 2.5 - idle"
+                )
+                parts = [f"<b>{money(rate)}/min</b>", label]
+                parts += self._balance_parts(0.0, rate)
             else:
                 flavour = "local model" if mode == "local" else "passthrough"
-                parts = ["<b>$0.00/s</b>", f"{flavour} - no credits spent"]
+                parts = ["<b>$0.00/min</b>", f"{flavour} - no credits spent"]
                 if self.settings.balance_usd > 0:
                     parts += self._balance_parts(0.0)
             self.credit_box.setText(" &nbsp;·&nbsp; ".join(parts))
@@ -1137,13 +1414,13 @@ class MainWindow(QMainWindow):
 
         # Quote the rate the running engine is actually billed at, not whatever
         # the checkbox says now: flipping it mid-call does not change the session.
-        rate = float(billing.get("usd_per_min", rate * 60)) / 60.0
+        rate_per_min = float(billing.get("usd_per_min", quality.per_minute(fast)))
         self._run_usd = max(0.0, round(float(billing["usd"]) - self._run_offset, 3))
-        parts = [f"<b>{money(rate)}/s</b>", f"{clock(billing['seconds'])} billed"]
+        parts = [f"<b>{money(rate_per_min)}/min</b>", f"{clock(billing['seconds'])} billed"]
         if billing.get("parked"):
             parts.append("billing paused")
         parts.append(f"{money(self._run_usd)} this run")
-        parts += self._balance_parts(self._run_usd)
+        parts += self._balance_parts(self._run_usd, rate_per_min)
         self.credit_box.setText(" &nbsp;·&nbsp; ".join(parts))
 
     def _save_spend_progress(self) -> None:
@@ -1177,12 +1454,22 @@ class MainWindow(QMainWindow):
         # which then silently pointed the next launch at the black IR camera.
         if selected is not None and int(selected) >= 0:
             self.settings.camera_index = int(selected)
+            # Kept so the same device is found again after a renumbering.
+            self.settings.camera_name = self.camera_combo.currentText()
         if self.radio_decart.isChecked():
             self.settings.mode = "decart"
         elif self.radio_local.isChecked():
             self.settings.mode = "local"
         else:
             self.settings.mode = "passthrough"
+        if self.max_check.isChecked():
+            # Maximum quality is a Lucy configuration, so a saved state that says
+            # otherwise loses to it rather than starting the wrong engine.
+            self.settings.mode = "decart"
+            # The model's native frame. The virtual camera must not downscale
+            # what Lucy rendered, or the mode's promise is undone after the fact.
+            self.settings.width, self.settings.height = quality.WIDTH, quality.HEIGHT
+            self.settings.fps = quality.FPS
         self.settings.preset = self.preset_combo.currentData()
         self.settings.prompt = self.prompt_edit.toPlainText().strip()
         self.settings.character_notes = self.notes_edit.text().strip()
@@ -1193,7 +1480,10 @@ class MainWindow(QMainWindow):
         self.settings.body_swap = self.body_swap_check.isChecked()
         self.settings.tryon = self.tryon_check.isChecked()
         self.settings.garment_image = self._garment_path
-        self.settings.fast_mode = self.fast_check.isChecked()
+        self.settings.max_quality = self.max_check.isChecked()
+        # Fast mode is a 2x bill for the same picture, so it can never be on
+        # together with maximum quality.
+        self.settings.fast_mode = self.fast_check.isChecked() and not self.settings.max_quality
         self.settings.pause_when_idle = self.pause_check.isChecked()
         self.settings.pip_camera = self.pip_check.isChecked()
         self.settings.vcam_backend = self.backend_combo.currentData() or ""
@@ -1206,11 +1496,35 @@ class MainWindow(QMainWindow):
         else:
             self._start()
 
+    def _confirm_price(self) -> bool:
+        """State the bill before the first maximum-quality session of a launch.
+
+        Once per launch rather than once per start: the arithmetic is shown at
+        the moment money starts moving, and the credit box carries the live
+        version (rate, billed time, minutes left) from then on. Returns False
+        when the user backs out, and nothing is started or billed.
+        """
+        if self._price_shown:
+            return True
+        self._price_shown = True
+        answer = QMessageBox.question(
+            self,
+            "Maximum quality - what it costs",
+            quality.receipt(self.settings.balance_usd, self.settings.balance_spent),
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Ok,
+        )
+        return answer == QMessageBox.StandardButton.Ok
+
     def _start(self) -> None:
         settings = self._collect_settings()
         if settings.mode == "decart" and not get_api_key():
             QMessageBox.information(
                 self, "API key required",
+                "Maximum quality runs on Lucy, which needs a Decart API key. Save "
+                "one under Engine, or untick Maximum quality to use the free "
+                "local engine instead."
+                if settings.max_quality else
                 "Enter your Decart API key, or switch to Passthrough to test the "
                 "camera and virtual camera without spending credits.",
             )
@@ -1233,6 +1547,19 @@ class MainWindow(QMainWindow):
         if settings.camera_index < 0:
             QMessageBox.warning(self, "No camera", "No working camera was found.")
             return
+        if settings.mode == "decart" and settings.max_quality:
+            if not self._reference_path:
+                # Without a photo there is no character to put on camera: Lucy
+                # would re-render you, at $1.20 a minute, for nothing.
+                QMessageBox.information(
+                    self, "Maximum quality needs a character photo",
+                    "Maximum quality swaps you for the person in the character "
+                    "photo. Choose one under Character first - without it the "
+                    "session would bill you to re-render your own face.",
+                )
+                return
+            if not self._confirm_price():
+                return
 
         self.start_btn.setEnabled(False)
         self.start_btn.setText("Starting...")
@@ -1262,6 +1589,7 @@ class MainWindow(QMainWindow):
                     garment_image=self._garment_path if settings.tryon else None,
                     model=tryon.MODEL if settings.tryon else settings.model,
                     fast_mode=settings.fast_mode,
+                    max_quality=settings.max_quality and not settings.tryon,
                     pause_when_idle=settings.pause_when_idle,
                     on_log=self.bridge.log.emit,
                 )

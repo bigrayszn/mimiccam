@@ -10,7 +10,7 @@
 
 MimicCam has two engines behind one virtual camera:
 
-- **Local (free, offline, default)** - a small identity-swap model runs on your own GPU. No API key, no subscription, no network after a one-time model download. It swaps the **face** (plus the character's hair and skin tone), and can transplant the character's **clothes** onto your own silhouette if you ask it to; it cannot change your body shape - that is a generative video model, not a 128 px face network.
+- **Local (free, offline, default)** - a small identity-swap model runs on your own GPU. No API key, no subscription, no network after a one-time model download. It swaps the **face** (plus the character's hair and skin tone), and transplants the character's **clothes** onto your own silhouette (on by default - untick **Wear the character's clothes** to go without); it cannot change your body shape - that is a generative video model, not a 256 px face network.
 - **Lucy 2.5 (paid)** - [Decart's Lucy 2.5](https://docs.platform.decart.ai/models/realtime/lucy-2.5) realtime video-to-video model over WebRTC. This is the **whole-person** mode: face, hair, body shape and complete outfit, at $0.02/s. See [How Lucy demand is phrased](#how-lucy-demand-is-phrased) - the wording is what makes the clothes change.
 
 Either way your call app sees a webcam called **OBS Virtual Camera** (or **Unity Video Capture**) and never knows the difference.
@@ -66,7 +66,7 @@ webcam for - looking like someone else on a call - at zero marginal cost.
 | Python | 3.10+ (only when running from source) |
 | Virtual camera | **OBS Studio** (recommended, its virtual camera ships with it) **or** Unity Capture |
 | Account | none for the local engine; a Decart API key only for Lucy |
-| Disk | ~700 MB for the local models (downloaded once by the app) |
+| Disk | ~640 MB downloaded once, plus a 768 MB fp32 copy of the swap network built from it |
 | Network | none for the local engine; ~2-4 Mbps up/down for Lucy |
 
 ## Install from source
@@ -217,6 +217,55 @@ that read as fake even when the geometry is perfect. Both are fixed the same way
   (variance 571 -> 622) for a slightly fainter blink.
 - Cost: **+0.4 ms** a frame (4.8 vs 4.4 ms per paste, measured at 1280x720).
 - Switchable in the app: *Keep my mouth and eyes (real expression)*, on by default.
+
+### The 256 px swap network
+
+inswapper renders the face at 128 px, so at webcam scale the swapped face is soft
+next to a sharp room. The free engine now prefers **HyperSwap 1a** (FaceFusion Labs,
+402 MB), a 256 px swap network, and runs **XSeg** (DeepFaceLab, 70 MB) in front of the
+paste so a hand, a strand of hair or a microphone does not get painted over. Both come
+down with the core models; a rig that only has the 128 px network still runs on it.
+
+Same photo, same identity, same paste path, measured at 100 % by
+`tests/verify_swapper_tier.py`:
+
+| | 128 px inswapper | 256 px HyperSwap |
+|---|---|---|
+| Identity to the character (ArcFace cosine) | **0.87** | 0.70 |
+| Face-region sharpness (Laplacian variance) | 9.6 | **30.9** (3.2x) |
+| Render cost | 37.6 ms | **29.9 ms** |
+| Occlusion mask | - | +20 ms on the render thread, once per render |
+
+It is a trade, not a free win: the 256 px network is **three times sharper and a
+little faster**, and gives back about a fifth of the character likeness the 128 px
+network had. If the likeness matters more than the detail, keep `inswapper_128.onnx`
+and delete the 256 px files - `models.swapper_path()` falls back to it on its own.
+
+- **fp16 is not usable on this GPU, and that is the whole story of the tier.**
+  FaceFusion ships the network in half precision; DirectML runs that as an
+  *identity-blind* reconstruction. Measured on a real frame, the pasted face scored
+  **0.16** cosine against the character from a fused fp16 graph, **0.55** with graph
+  fusion off, **0.70** from the same weights re-typed fp32, and **0.77** on the CPU
+  path (which casts the whole graph up, at 473 ms a render). So the app builds an
+  fp32 copy of the network **locally on first run** - a rewrite of tensors it already
+  has, 768 MB, ~40 s, no download - and prefers it.
+- **XSeg decides per pixel whether the render may be pasted at all.** One 256 px pass
+  reads 1.00 across the cheeks and 0.00 on an object in front of them; inside the
+  paste it is a veto, so the frame's own hand survives instead of being replaced by
+  the character's cheek. Measured on a drawn hand crossing the mouth: the paste's mean
+  weight over those pixels falls from **0.94 to 0.02**, and the pixels themselves change
+  8x less than they do without the mask.
+  It costs ~20 ms, so it runs on the **render thread**, once per render at most: a hand
+  that arrives is caught at the next render, within about a tenth of a second. That
+  placement is not cosmetic. Running it from the paste thread - a second DirectML
+  session executing while the render thread ran the swap network - crashed the process
+  intermittently (the app's own selftest died in 2 of 2 runs), and the CPU is not an
+  alternative at **630 ms** a pass. One session per thread; the paste warps the cached
+  mask.
+- **HyperSwap brings its own face mask.** Where inswapper left an ellipse, the 256 px
+  network returns a second tensor: its own idea of which pixels it drew. It follows
+  the hairline and the jaw better than any ellipse, and the ellipse is still multiplied
+  in underneath because the network's mask reaches past the jaw on a turned head.
 
 ### Detail
 
@@ -370,6 +419,12 @@ generative model, and that is still Lucy's job.
 - Its opacity is gated by the person matte: in a room dark enough that RVM only
 reaches alpha 0.43 over the torso, the suit comes through at 43%. Same light as
 above - and the backward assumption is the same as for the face.
+- It is **on by default**: a swapped face over your own shirt reads as a mask, which
+is the difference between the two modes that people notice first. It needs two
+things to show at all - a garment actually visible in the character photo (a
+portrait cropped at the collarbone has nothing to wear) and your torso inside the
+camera frame. With the shoulders at the bottom edge there is no cloth to replace
+and the pass is a no-op; untick it then and keep the frames.
 
 ### Sitting in the reference photo's room
 
@@ -428,7 +483,10 @@ Models are fetched from the official sources, size-checked, and never bundled:
 |---|---|---|---|
 | `yunet.onnx` | face detection + landmarks | 0.2 MB | MIT (OpenCV Zoo) |
 | `w600k_r50.onnx` | ArcFace identity embedding | 166 MB | InsightFace, non-commercial research |
-| `inswapper_128.onnx` | 128x128 swap network | 528 MB | InsightFace, non-commercial research |
+| `inswapper_128.onnx` | 128x128 swap network - the fallback, no longer fetched by a fresh install | 528 MB | InsightFace, non-commercial research |
+| `hyperswap_1a_256.onnx` | 256x256 swap network | 402 MB | ResearchRAIL (FaceFusion Labs), non-commercial research |
+| `hyperswap_1a_256_fp32.onnx` | the same weights re-typed fp32, built locally on first run | 768 MB | same weights, same licence |
+| `xseg_3.onnx` | XSeg occlusion mask | 70 MB | GPL-3.0 (DeepFaceLab) |
 | `rvm_mobilenetv3_fp32.onnx` | person matte (Robust Video Matting) - studio background only | 15 MB | GPL-3.0 |
 | `lama_fp32.onnx` | erases the reference person from the room - studio background only | 208 MB | Apache-2.0 (trained on Places2, CC-BY 4.0) |
 | `gfpgan_1.4.onnx` | restores detail in the swapped face - Detail pass only | 340 MB | Apache-2.0 (trained on FFHQ, CC BY-NC-SA 4.0) |
