@@ -11,10 +11,10 @@ session with three small on-device networks:
 * the swap network renders your face wearing that identity at 128x128, which is
   glued back on with a soft face mask.
 
-A dark or backlit frame is lifted with a gamma curve before either of the first
-two looks at it (``exposure.py``). Without that, a face at luma 35 was tracked,
-swapped and published as a near-silhouette in which the character could not be
-seen at all.
+A dark or backlit face is lifted with a gamma curve before the networks look at
+it (``exposure.py``), but only on their copies of the crop: the frame that gets
+published keeps the camera's own exposure, so the character sits in the room's
+real light instead of reading as a bright mask over a dark neck.
 
 Two threads share the work. The render thread runs the swap network as fast as
 the GPU allows (~16 swaps a second on a laptop 4070 through DirectML); the frame
@@ -30,6 +30,7 @@ key, and no network traffic after the one-time model download.
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from typing import Optional
@@ -51,6 +52,7 @@ POSE_HOLD_S = 0.40
 # hard-swapping them pops. A 0.6/0.4 mix keeps the detail moving without the
 # face flickering between two renders.
 TEXTURE_BLEND = 0.60
+
 # Run GFPGAN on every second render. It costs ~44 ms of the same GPU the
 # detector uses. On an idle laptop that is free at the loop's 30 fps (23 ms a
 # frame against 21 without it); with the machine busy, every render measured
@@ -182,6 +184,14 @@ class LocalEngine(Engine):
         self._pending: Optional[tuple[np.ndarray, np.ndarray]] = None
         self._pending_event = threading.Event()
 
+        # A character photo asked for mid-session. Applying it means loading and
+        # embedding an image and rebuilding the wardrobe, so it is handed to the
+        # frame thread instead of running on whoever called set_reference.
+        self._reference_lock = threading.Lock()
+        self._reference_request: Optional[str] = None
+        self._reference_result = None
+        self._reference_thread: Optional[threading.Thread] = None
+
         # The matte runs on its own thread, in parallel with face detection and
         # the swap paste. It is ~16 ms; doing it inline would cost more than the
         # whole composite budget.
@@ -215,6 +225,8 @@ class LocalEngine(Engine):
         # at luma 35 was tracked, swapped and published as a near-silhouette.
         self._normaliser = exposure.Normaliser()
         self._low_light_noted = False
+        # The gamma the last detected face needed, held across a dropped pose.
+        self._last_lift_gamma = 1.0
         self._latency_ms = 0.0
         self._fps = 0.0
         self._render_fps = 0.0
@@ -246,15 +258,79 @@ class LocalEngine(Engine):
         self._stop.set()
         self._pending_event.set()
         self._matte_event.set()
-        for thread in (self._render_thread, self._matte_thread, self._thread):
+        for thread in (self._render_thread, self._matte_thread, self._reference_thread,
+                       self._thread):
             if thread is not None:
                 thread.join(timeout=3.0)
         self._render_thread = None
         self._matte_thread = None
+        self._reference_thread = None
         self._thread = None
         if self._cv_threads_before and CV_THREADS > 0:
             cv2.setNumThreads(self._cv_threads_before)
             self._cv_threads_before = 0
+
+    def set_reference(self, path: Optional[str]) -> None:
+        """Change the character of a running session; None clears it.
+
+        The identity, the hair and the clothes all come from the character
+        photo, so a new one used to mean Stop and Start camera. The work goes to
+        its own thread and the finished result is swapped in by the frame thread
+        on the next frame - reading the photo, embedding it and measuring the
+        reference hair costs ~1.6 s, and doing that inline froze the video for
+        two seconds.
+        """
+        with self._reference_lock:
+            self._reference_request = path or ""
+            start = self._reference_thread is None or not self._reference_thread.is_alive()
+        if start:
+            self._reference_thread = threading.Thread(
+                target=self._reference_worker, name="character-switch", daemon=True
+            )
+            self._reference_thread.start()
+
+    def _reference_worker(self) -> None:
+        """Prepare character photos off the frame thread, newest wins."""
+        while not self._stop.is_set():
+            with self._reference_lock:
+                request, self._reference_request = self._reference_request, None
+            if request is None:
+                return
+            prepared = None
+            if request:
+                try:
+                    prepared = self._prepare_character(request)
+                except Exception as exc:  # noqa: BLE001 - reported, not fatal
+                    self._log(
+                        f"Character image unusable ({exc}) - keeping the one "
+                        "already running"
+                    )
+            with self._reference_lock:
+                self._reference_result = (request, prepared)
+
+    def _commit_reference(self, path: str, prepared) -> None:
+        """The frame thread's half of set_reference: a cheap attribute swap."""
+        self.reference_image = path
+        # The cached texture belongs to the old face: drop it, or the previous
+        # identity keeps being pasted for up to TEXTURE_TTL_S after the change.
+        with self._texture_lock:
+            self._texture = None
+            self._texture_ts = 0.0
+        with self._pending_lock:
+            self._pending = None
+        # The paste's colour lock belongs to the old face.
+        self._reset_tone()
+        if not path:
+            self._embedding = None
+            self._hair = None
+            self._wardrobe = None
+            self.swapping = False
+            self._log("Character cleared: applying the look without swapping identity")
+            return
+        if prepared is None:
+            return
+        self._install_character(path, prepared)
+        self._log(f"Character switched to {os.path.basename(path)}")
 
     def push(self, frame_rgb: np.ndarray, ts: float) -> None:
         with self._in_lock:
@@ -305,8 +381,25 @@ class LocalEngine(Engine):
             models.path("detector"), max_side=self.max_side, refine=False
         )
         self._embedder = face.FaceEmbedder(models.path("identity"), self.providers)
+        # The 256 px network when it is installed, the 128 px one otherwise: the
+        # tier is additive, so a rig that has not fetched it still swaps.
         self._swapper = face.FaceSwapper(
-            models.path("swapper"), self.providers, keep_expression=self.keep_expression
+            models.swapper_path(), self.providers, keep_expression=self.keep_expression
+        )
+        if getattr(self, "occlusion", True) and models.present("occluder"):
+            try:
+                from .occlusion import Occluder
+
+                self._swapper.occluder = Occluder(models.path("occluder"), self.providers)
+            except Exception as exc:  # noqa: BLE001 - reported, not fatal
+                self._log(
+                    f"Occlusion mask unavailable ({exc}) - swapping the whole face"
+                )
+        precision = models.swapper_precision()
+        self._log(
+            f"Swap network: {self._swapper.size} px"
+            f"{' (HyperSwap tier' + (', ' + precision if precision else '') + ')' if self._swapper.size >= 256 else ' (inswapper)'}"
+            f"{' + XSeg occlusion' if self._swapper.occluder is not None else ''}"
         )
         self._load_enhancer()
         self._provider = self._swapper.session.get_providers()[0]
@@ -335,27 +428,9 @@ class LocalEngine(Engine):
             # user would see a modal error and no picture at all. Degrade to the
             # look-only path and say exactly what to fix.
             try:
-                photo = face.load_image(self.reference_image)
-                reference_face = face.largest(self._detector.detect(photo))
-                if reference_face is None:
-                    raise ValueError(
-                        "No face found in that image. Use a clear, front-facing "
-                        "photo of the character's face."
-                    )
-                self._embedding = self._embedder.embedding(photo, reference_face.landmarks)
-                # The same detection seeds the hair pass: its landmarks are the
-                # ruler the reference head is measured in.
-                self._hair = hair.HairPass(photo, reference_face.landmarks, on_log=self._log)
-                if self._hair.active:
-                    self._log(
-                        f"Reference hair will follow the head "
-                        f"({self._hair.coverage * 100:.0f}% of the head crop)"
-                    )
-                self.swapping = True
-                height, width = photo.shape[:2]
-                self._log(f"Character locked from {self.reference_image} ({width}x{height})")
-                if self.body_swap:
-                    self._build_wardrobe(photo, reference_face.box)
+                self._install_character(
+                    self.reference_image, self._prepare_character(self.reference_image)
+                )
             except Exception as exc:  # noqa: BLE001 - reported, not fatal
                 self.swapping = False
                 self._embedding = None
@@ -366,25 +441,66 @@ class LocalEngine(Engine):
         else:
             self._log("No character image: applying the look without swapping identity")
 
-    def _build_wardrobe(self, photo: np.ndarray, face_box: tuple[int, int, int, int]) -> None:
+    def _prepare_character(self, path: str):
+        """(embedding, hair pass, photo, face box) for one character photo.
+
+        Raises when the photo cannot carry a swap. Called on the frame thread at
+        startup and on the switch thread for a live change.
+        """
+        photo = face.load_image(path)
+        reference_face = face.largest(self._detector.detect(photo))
+        if reference_face is None:
+            raise ValueError(
+                "No face found in that image. Use a clear, front-facing "
+                "photo of the character's face."
+            )
+        embedding = self._embedder.embedding(photo, reference_face.landmarks)
+        # The same detection seeds the hair pass: its landmarks are the ruler
+        # the reference head is measured in.
+        hair_pass = hair.HairPass(photo, reference_face.landmarks, on_log=self._log)
+        return embedding, hair_pass, photo, reference_face.box
+
+    def _install_character(self, path: str, prepared) -> None:
+        """Put a prepared character live: identity, hair, then the wardrobe.
+
+        The wardrobe runs last and on the frame thread because it borrows the
+        engine's matte session, which the matte thread owns.
+        """
+        embedding, hair_pass, photo, face_box = prepared
+        self._embedding = embedding
+        self._hair = hair_pass
+        self._wardrobe = self._build_wardrobe(photo, face_box) if self.body_swap else None
+        self.swapping = True
+        if hair_pass is not None and hair_pass.active:
+            self._log(
+                f"Reference hair will follow the head "
+                f"({hair_pass.coverage * 100:.0f}% of the head crop)"
+            )
+        height, width = photo.shape[:2]
+        self._log(f"Character locked from {path} ({width}x{height})")
+
+    def _build_wardrobe(self, photo: np.ndarray, face_box: tuple[int, int, int, int]):
         """Cut the character's garment out of the reference photo.
 
         Needs the person matte, which the room composite also uses: the model is
         shared, so turning both on costs one mate, not two. The build itself is
         two model-free measurements (skin, alpha) and one crop.
+
+        Returns the wardrobe, or None when clothes cannot be worn - the caller
+        keeps it in ``self._wardrobe`` so a failed change leaves the previous
+        outfit running.
         """
         if not models.present("matte"):
             self._log("Wardrobe skipped: the person matte model is not installed")
-            return
+            return None
         try:
             if self._matte is None:
                 self._matte = matting.shared(models.path("matte"), ["CPUExecutionProvider"])
-            self._wardrobe = wardrobe.Wardrobe(photo, face_box, self._matte, on_log=self._log)
-            if not self._wardrobe.ready:
-                self._wardrobe = None
+            built = wardrobe.Wardrobe(photo, face_box, self._matte, on_log=self._log)
+            return built if built.ready else None
         except Exception as exc:  # noqa: BLE001 - clothes are optional
-            self._wardrobe = None
             self._log(f"Wardrobe unavailable: {exc}")
+            return None
 
     def _dress(self, frame_bgr: np.ndarray, face_box: tuple[int, int, int, int]) -> np.ndarray:
         """Composite the character's clothes, reusing or refreshing the matte."""
@@ -500,6 +616,14 @@ class LocalEngine(Engine):
                            else rendered)
             else:
                 texture = rendered
+            # Stored as rendered, not folded into the previous one. Folding was
+            # measured here and rejected: the network is deterministic, so on a
+            # still head consecutive renders are byte-identical and there is
+            # nothing to smooth, while on a moving head the fold averages two
+            # poses - it softens the face, costs identity (0.637 -> 0.612 at a
+            # 0.6 fold) and still only takes the biggest frame-to-frame step from
+            # 6.6 to 3.7 levels at 1280x720. The paste's own blend (TEXTURE_BLEND) is for a
+            # texture that went stale, not for every render.
             self._store_texture(texture)
             self.texture_refreshes += 1
 
@@ -554,6 +678,16 @@ class LocalEngine(Engine):
                 return None, None, 0.0
             return self._matte_out[0], self._matte_out[1], self._matte_out_ts
 
+    def _reset_tone(self) -> None:
+        """Start the paste's locked colour offset over.
+
+        Guarded because the engine only asks a swapper to ``render`` and
+        ``paste``: test stand-ins do no compositing and have no lock.
+        """
+        reset = getattr(self._swapper, "reset_tone", None)
+        if reset is not None:
+            reset()
+
     def _queue_render(self, frame_bgr: np.ndarray, landmarks: np.ndarray) -> None:
         with self._pending_lock:
             self._pending = (frame_bgr.copy(), landmarks.copy())
@@ -582,6 +716,19 @@ class LocalEngine(Engine):
         """Open GFPGAN if the Detail pass is on and its file is installed."""
         self._enhancer = None
         if not self.detail:
+            return
+        # The 256 px tier makes this pass redundant. GFPGAN exists to rebuild
+        # detail inswapper's 128 px render does not have; at 256 px the raw
+        # render already measures 30.9 Laplacian against 35.1 for 128 px plus
+        # GFPGAN, for 44 ms a call - half the frame budget on this card. On a
+        # live camera keeping it halved the refresh rate (9 Hz against 19 Hz)
+        # and the extra pass is what made the picture feel like it was
+        # stuttering, so the pass stands down when the tier is active.
+        if self._swapper is not None and getattr(self._swapper, "size", 0) >= 256:
+            self._log(
+                f"Detail pass off: the {self._swapper.size} px render is already "
+                "sharp (GFPGAN is there for the 128 px network)"
+            )
             return
         if not models.present("enhancer"):
             self._log("Detail pass skipped: gfpgan_1.4.onnx is not installed")
@@ -622,6 +769,10 @@ class LocalEngine(Engine):
         produced = 0
 
         while not self._stop.is_set():
+            with self._reference_lock:
+                swapped, self._reference_result = self._reference_result, None
+            if swapped is not None:
+                self._commit_reference(*swapped)
             with self._in_lock:
                 frame, ts = self._in_frame, self._in_ts
             if frame is None or ts == last_ts:
@@ -676,23 +827,29 @@ class LocalEngine(Engine):
                 # look at a lifted frame recovers the face instead.
                 retry = self._normaliser.retry_gamma(bgr)
                 if retry is not None:
+                    # Only the look-out gets the lifted copy. Landmarks are
+                    # per-pixel positions, so a gamma curve leaves them valid on
+                    # the unlifted frame the paste and the caller use.
                     lifted = self._normaliser.apply(bgr, retry)
                     detections = self._detector.detect(lifted)
-                    if detections:
-                        bgr = lifted
             if detections:
                 detections.sort(key=lambda d: d.area, reverse=True)
                 face_det = detections[0]
-                # Exposure before the swap sees the face. A gain would clip the
-                # window behind a backlit head; gamma moves only the shadows.
-                bgr,                lifted_gamma = self._normaliser.lift_for_face(bgr, face_det.box)
-                self._note_light(lifted_gamma < 1.0)
-                if lifted_gamma < 1.0 and not self._low_light_noted:
+                # How dark the face is, measured but not applied: the network
+                # gets a brightened crop of its own (face.brighten_for_network)
+                # and the frame keeps the exposure the camera gave it. Lifting
+                # the published frame is what made the swapped face read as a
+                # pale mask over a dark neck.
+                lift_gamma = self._normaliser.measure(bgr, face_det.box)
+                self._last_lift_gamma = lift_gamma
+                self._note_light(lift_gamma < 1.0)
+                if lift_gamma < 1.0 and not self._low_light_noted:
                     self._low_light_noted = True
                     self._log(
-                        "Low light: lifting a face at luma "
-                        f"{self._normaliser.last_luma or 0:.0f} "
-                        f"onto {exposure.TARGET_LUMA:.0f} (gamma {lifted_gamma:.2f})"
+                        "Low light: a face at luma "
+                        f"{self._normaliser.last_luma or 0:.0f} is lifted for the "
+                        f"face network only (gamma {lift_gamma:.2f}); the picture "
+                        "keeps the camera's own exposure"
                     )
                 # Smooth the transform, not the detection: the paste must follow
                 # the face without inheriting detector jitter. The clock is in
@@ -711,17 +868,16 @@ class LocalEngine(Engine):
                 # is what makes the swap look like it is bouncing off.
                 landmarks = self._last_landmarks
                 face_det = None
-                # Hold the exposure too. Lifting only on detected frames made the
-                # picture step between lifted and unlifted while the detector
-                # flickered on a turned head.
-                if self._last_face_box is not None:
-                    bgr, held_gamma = self._normaliser.lift_for_face(bgr, self._last_face_box)
-                    self._note_light(held_gamma < 1.0)
+                # Hold the light reading too: the matte's detail level must not
+                # step between frames just because the detector dropped one.
+                self._note_light(self._last_lift_gamma < 1.0)
             else:
                 self._smoother.reset()
                 self._last_landmarks = None
                 self.frames_no_face += 1
                 landmarks = None
+                # The face is gone; wherever it comes back may be lit differently.
+                self._reset_tone()
 
             self._paste_landmarks = None if landmarks is None else landmarks.copy()
             if landmarks is not None:

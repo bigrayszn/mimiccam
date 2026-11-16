@@ -24,7 +24,7 @@ from . import __copyright__, __url__, __version__
 def _list_cameras() -> int:
     from .capture import probe_cameras
 
-    entries = probe_cameras(6)
+    entries = probe_cameras()
     if not entries:
         print("No working camera found.")
         return 1

@@ -43,6 +43,10 @@ class Settings:
 
     camera_index: int = 0
     camera_name: str = ""
+    # The camera list from the last run, so the picker opens with real names
+    # instead of "No camera found" while the first scan is still opening
+    # devices. Each item is {index, name, width, height, mean_luma}.
+    cameras: list = field(default_factory=list)
     width: int = 1280
     height: int = 720
     fps: int = 30
@@ -59,7 +63,10 @@ class Settings:
     # Wear the character's clothes: the garment in the reference photo is cut
     # out (person matte, minus face and skin), scaled to the live face and
     # pasted inside the live silhouette. Free engine only.
-    body_swap: bool = False
+    # On by default: a swapped face over the original outfit reads as a mask,
+    # not a character. It costs frames (the matte it borrows, plus the warp),
+    # so it stays a switch - see the README's body-pass measurement.
+    body_swap: bool = True
     studio_background: bool = False
     # Try-on mode: Lucy replaces the outfit from a garment photo instead of
     # swapping the person. ``prompt`` then describes the garment.
@@ -73,6 +80,12 @@ class Settings:
     # 340 MB model).
     detail: bool = True
     fast_mode: bool = False
+    # Maximum quality: Lucy on the standard tier (the best picture Decart
+    # sells), native 1280x720@30, idle pausing off. See mimiccam.quality.
+    max_quality: bool = False
+    # XSeg occlusion: keep hands, hair and objects in front of the face out of
+    # the swap. Needs the occluder model; falls back silently when absent.
+    occlusion: bool = True
     # Draw the raw camera as a small box over the output preview.
     pip_camera: bool = True
     # Decart has no balance API, so the figure is typed in from the dashboard

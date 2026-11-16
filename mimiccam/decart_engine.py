@@ -38,7 +38,7 @@ from decart import (
 )
 from livekit import rtc
 
-from . import __version__, credits, prompting, reference, tryon
+from . import __version__, credits, prompting, quality, reference, tryon
 from .engine import Engine
 
 WATCHDOG_TIMEOUT_S = 12.0
@@ -97,6 +97,7 @@ class DecartEngine(Engine):
         garment_image: Optional[str] = None,
         model: str = "lucy-2.5",
         fast_mode: bool = False,
+        max_quality: bool = False,
         pause_when_idle: bool = True,
         idle_after_s: float = IDLE_PAUSE_S,
         on_log=None,
@@ -113,7 +114,11 @@ class DecartEngine(Engine):
         self.appearance: Optional[reference.Appearance] = None
         self.prompt = prompt
         self.model_name = model
-        self.fast_mode = fast_mode
+        # Maximum quality is the standard tier by definition: fast mode is 2x
+        # the price for the same picture, so a quality mode cannot use it even
+        # if a stale setting asks for both.
+        self.max_quality = bool(max_quality)
+        self.fast_mode = bool(fast_mode) and not self.max_quality
         self.pause_when_idle = pause_when_idle
         self.idle_after_s = max(10.0, float(idle_after_s))
         self._log = on_log or (lambda _m: None)
@@ -174,6 +179,13 @@ class DecartEngine(Engine):
                 )
             if self.appearance is not None and self.appearance.framing.hint:
                 self._log(f"Character photo: {self.appearance.framing.hint}")
+        if self.max_quality:
+            # Before any session exists, so the price is on screen (and in the
+            # log) the moment Start is pressed, not after the meter is running.
+            self._log(
+                f"Maximum quality: {quality.summary()}. Fast mode would bill "
+                f"{quality.rate_text(True)} for the same picture."
+            )
         self.connected = threading.Event()
         self.reconnects = 0
         self.frames_published = 0
@@ -302,6 +314,29 @@ class DecartEngine(Engine):
             asyncio.run_coroutine_threadsafe(_apply(), loop)
         except Exception as exc:  # noqa: BLE001
             self._log(f"Prompt update failed: {exc}")
+
+    def set_reference(self, path: Optional[str]) -> None:
+        """Change (or clear) the character photo of a live session.
+
+        The identity arrives as the reference image of the input message, so the
+        update is the existing prompt with a new photo behind it - no reconnect,
+        no new session, and the credits meter keeps counting where it was.
+        """
+        if self.try_on:
+            # In try-on the reference image is the garment; a face would be read
+            # as a shirt. That is what set_garment is for.
+            raise RuntimeError("This session is try-on: the reference image is the garment")
+        self._reference_bytes = load_reference_image(path) if path else None
+        if path:
+            try:
+                self.appearance = reference.analyse(path)
+            except Exception as exc:  # noqa: BLE001 - a photo we cannot read is not fatal
+                self._log(f"Could not read the character photo: {exc}")
+        self._log(
+            f"Character switched to {Path(path).name}" if path
+            else "Character cleared: Lucy keeps the look without a new face"
+        )
+        self.set_prompt(self.prompt)
 
     def set_garment(self, path: str, prompt: Optional[str] = None) -> None:
         """Switch outfits mid-call without reconnecting.
@@ -443,8 +478,11 @@ class DecartEngine(Engine):
         self._last_motion_ts = self._session_opened_at
         self._session_billed = 0.0
         rate = FAST_USD_PER_SECOND if self.fast_mode else USD_PER_SECOND
+        tier = "maximum quality" if self.max_quality else (
+            "fast" if self.fast_mode else "standard"
+        )
         self._log(
-            f"Lucy session started ({'fast' if self.fast_mode else 'standard'} mode, "
+            f"Lucy session started ({tier} tier, "
             f"${rate:.2f}/s = ${rate * 60:.2f}/min)"
         )
 

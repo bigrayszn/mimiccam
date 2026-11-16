@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -196,6 +197,30 @@ class SmoothingAndToneTests(unittest.TestCase):
         self.assertGreater(float(cv2.cvtColor(out, cv2.COLOR_BGR2GRAY).mean()),
                            float(cv2.cvtColor(render, cv2.COLOR_BGR2GRAY).mean()))
 
+    def test_tone_match_follows_the_face_not_the_background(self) -> None:
+        """A bright wall behind a dark face must not lighten the swapped face.
+
+        The old match averaged a box whose corners held the room: on a backlit
+        frame that is the wall at 230, and the render got pulled up toward it -
+        the pale mask over a dark neck.
+        """
+        reference = np.full((128, 128, 3), 230, dtype=np.uint8)      # bright wall
+        cv2.ellipse(reference, (64, 72), (38, 38), 0, 0, 360, (40, 48, 58), -1)  # dark face
+        texture = np.full((128, 128, 3), 150, dtype=np.uint8)
+        out = face.match_tone(texture, reference, strength=1.0)
+        cheek = float(cv2.cvtColor(out, cv2.COLOR_BGR2LAB)[72, 64, 0])
+        source_cheek = float(cv2.cvtColor(reference, cv2.COLOR_BGR2LAB)[72, 64, 0])
+        self.assertLess(abs(cheek - source_cheek), 8.0,
+                        f"pasted face at L {cheek:.0f}, the person's own at {source_cheek:.0f}")
+        self.assertLess(float(out[2, 2].mean()), 120.0)
+
+    def test_a_dark_crop_is_brightened_for_the_network_only(self) -> None:
+        dark = np.full((128, 128, 3), 35, dtype=np.uint8)
+        seen = face.brighten_for_network(dark)
+        self.assertGreater(float(seen.mean()), float(dark.mean()) + 30.0)
+        lit = np.full((128, 128, 3), 160, dtype=np.uint8)
+        self.assertIs(face.brighten_for_network(lit), lit)
+
     def test_mask_reaches_the_jaw(self) -> None:
         mask = face.FaceSwapper._oval_mask(128)
         # 110 px down the crop is below the mouth on InsightFace's template.
@@ -233,7 +258,10 @@ class BodyPassTests(unittest.TestCase):
         out = self.body_mod.harmonize(self.frame, self.face_box, target, strength=1.0)
         after = cv2.cvtColor(out[self.arm], cv2.COLOR_BGR2LAB).reshape(-1, 3).mean(axis=0)
         self.assertLess(abs(after[1] - target[1]), abs(before[1] - target[1]) - 1.0)
-        self.assertLess(abs(after[2] - target[2]), abs(before[2] - target[2]) + 1e-3)
+        # The b delta here is close to zero, so this channel is only along for
+        # the LAB <-> BGR round trip: one 8-bit level of drift is the arithmetic,
+        # not a correction pulling the tint the wrong way.
+        self.assertLess(abs(after[2] - target[2]), abs(before[2] - target[2]) + 0.05)
 
     def test_harmonize_leaves_the_background_alone(self) -> None:
         out = self.body_mod.harmonize(
@@ -316,6 +344,107 @@ class PoseHoldTests(unittest.TestCase):
         self.assertEqual(int(self.engine._blend_texture(new).mean()), 255)
 
 
+class _FakeEmbedder:
+    """Identity from the mean pixel: a different photo gives a different vector."""
+
+    def embedding(self, frame, landmarks):
+        return np.full((512,), float(frame.mean()) / 255.0, np.float32)
+
+
+class LiveCharacterSwitchTests(unittest.TestCase):
+    """A new character photo must reach the running engine, not wait for restart."""
+
+    def setUp(self) -> None:
+        import tempfile
+        from unittest import mock
+
+        from mimiccam import local_engine as module
+
+        self.temp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.temp.name)
+        self.engine = module.LocalEngine(providers=["CPUExecutionProvider"])
+        self.engine.width, self.engine.height = 64, 64
+        self.engine._swapper = _FakeSwapper()
+        self.engine._detector = _FakeDetector()
+        self.engine._embedder = _FakeEmbedder()
+        self.engine._embedding = np.zeros((512,), np.float32)
+        # The hair pass segments the reference head with real code; the switch
+        # is what is under test here, so it is a stand-in.
+        patcher = mock.patch.object(module.hair, "HairPass", _FakeHair)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(self.temp.cleanup)
+
+    def _photo(self, name: str, tone: int, has_face: bool = True) -> str:
+        path = self.dir / name
+        cv2.imwrite(str(path), np.full((96, 96, 3), tone, dtype=np.uint8))
+        self.engine._detector.faces = [
+            face.Detection(box=(10, 10, 40, 40), score=0.9, landmarks=FACE_POINTS)
+        ] if has_face else []
+        return str(path)
+
+    def _switch(self, path: str) -> None:
+        """Ask for a character and run the two halves the threads would."""
+        self.engine.set_reference(path)
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            if self.engine._reference_result is not None:
+                break
+            time.sleep(0.01)
+        result = self.engine._reference_result
+        self.assertIsNotNone(result, "the switch thread never produced a result")
+        self.engine._reference_result = None
+        self.engine._commit_reference(*result)
+
+    def test_the_character_changes_mid_session(self) -> None:
+        path = self._photo("new.png", 200)
+        self.engine._embedding = np.zeros((512,), np.float32)
+        self.engine._store_texture(np.zeros((128, 128, 3), np.uint8))
+
+        self._switch(path)
+
+        self.assertTrue(self.engine.swapping)
+        self.assertEqual(self.engine.reference_image, path)
+        self.assertGreater(float(self.engine._embedding[0]), 0.5)
+        # The cached texture belonged to the old face and must not be pasted.
+        self.assertIsNone(self.engine._texture)
+
+    def test_the_preparation_does_not_block_the_caller(self) -> None:
+        """The 1.4 s hair pass must not run on the thread that asked."""
+        path = self._photo("slow.png", 120)
+        began = time.perf_counter()
+        self.engine.set_reference(path)
+        self.assertLess(time.perf_counter() - began, 0.05)
+        self._switch(path)
+
+    def test_clearing_the_character_stops_the_swap(self) -> None:
+        self._switch("")
+        self.assertFalse(self.engine.swapping)
+        self.assertIsNone(self.engine._embedding)
+
+    def test_a_bad_photo_keeps_the_running_character(self) -> None:
+        self._photo("good.png", 200)
+        self._switch(str(self.dir / "good.png"))
+        keep = self.engine._embedding.copy()
+
+        path = self._photo("noface.png", 10, has_face=False)  # detector finds nothing
+        self._switch(path)
+
+        self.assertTrue(self.engine.swapping)
+        self.assertTrue(np.array_equal(self.engine._embedding, keep))
+
+
+class _FakeHair:
+    active = False
+    coverage = 0.0
+
+    def __init__(self, *args, **kwargs) -> None:
+        pass
+
+    def apply(self, frame, landmarks):
+        return frame
+
+
 class HairPassTests(unittest.TestCase):
     """The reference hair must land on the live head, and nowhere else."""
 
@@ -352,6 +481,23 @@ class HairPassTests(unittest.TestCase):
         patch = out[int(spot[1]) - 6:int(spot[1]) + 6, int(spot[0]) - 6:int(spot[0]) + 6]
         self.assertLess(float(patch.mean()), 110.0)          # hair arrived
         self.assertGreater(float(out[5, 5].mean()), 120.0)   # wall untouched
+
+    def test_a_smudge_of_hair_is_not_a_hairstyle(self) -> None:
+        """A mask that barely clears the floor paints a blob on the live forehead.
+
+        A long-haired portrait that GrabCut took for background measured 5% - it
+        used to pass the 0.4% floor and warp a dark smudge onto the hairline.
+        """
+        from mimiccam import hair
+
+        image = np.full((320, 320, 3), 230, dtype=np.uint8)
+        cv2.ellipse(image, (100, 100), (13, 15), 0, 0, 360, (24, 26, 30), -1)   # a smudge
+        cv2.ellipse(image, (100, 168), (48, 60), 0, 0, 360, (150, 180, 210), -1)
+        points = FACE_POINTS + np.array([0.0, 95.0], dtype=np.float32)
+        pass_ = hair.HairPass(image, points)
+        self.assertGreater(pass_.coverage, 0.004, "the old 0.4% floor let this through")
+        self.assertLess(pass_.coverage, hair.MIN_COVERAGE)
+        self.assertFalse(pass_.active)
 
     def test_hairless_reference_is_inactive(self) -> None:
         from mimiccam import hair
@@ -636,11 +782,206 @@ class CameraProbeTests(unittest.TestCase):
         ]
         self.assertEqual([e.index for e in order_entries(entries)], [1, 0])
 
-    def test_black_camera_is_labelled(self) -> None:
+    def test_the_scan_covers_every_device_on_the_machine(self) -> None:
+        """A seventh camera is a real camera: the scan must reach it.
+
+        The ceiling used to be a hard six, which hid "OBS Virtual Camera" on
+        this laptop - the device the app tells people to select.
+        """
+        from unittest import mock
+
+        from mimiccam import capture
+
+        tried: list[int] = []
+
+        def refuse(index, *_args):
+            tried.append(index)
+            raise RuntimeError("no device here")
+
+        with mock.patch.object(capture, "dshow_device_names",
+                               lambda: [f"Device {i}" for i in range(9)]), \
+                mock.patch.object(capture, "_open_capture", side_effect=refuse):
+            self.assertEqual(capture.probe_cameras(), [])
+        # Devices are opened in parallel, so the calls are not in index order.
+        self.assertEqual(sorted(tried), list(range(9)))
+
+    class _CountingDevices:
+        """A machine with two lit cameras, counting how often each is opened."""
+
+        def __init__(self, names=("Front", "OBS Virtual Camera")) -> None:
+            self.names = list(names)
+            self.opened: list[int] = []
+
+        def open(self, index, *_args):
+            self.opened.append(index)
+            outer = self
+
+            class Device:
+                def isOpened(self):  # noqa: N802 - matches cv2
+                    return True
+
+                def read(self):
+                    frame = np.full((32, 32, 3), 120, dtype=np.uint8)
+                    frame[0, 0] = 255
+                    return True, frame
+
+                def release(self):
+                    pass
+
+            return Device()
+
+    def test_a_second_scan_does_not_open_the_cameras_again(self) -> None:
+        from unittest import mock
+
+        from mimiccam import capture
+
+        devices = self._CountingDevices()
+        with mock.patch.object(capture, "dshow_device_names", lambda: devices.names), \
+                mock.patch.object(capture, "_open_capture", side_effect=devices.open):
+            capture.clear_scan_cache()
+            self.addCleanup(capture.clear_scan_cache)
+            first = capture.scan_cameras()
+            opened_after_first = list(devices.opened)
+            second = capture.scan_cameras()
+
+        self.assertEqual(len(first), 2)
+        self.assertEqual(devices.opened, opened_after_first, "the cache missed")
+        self.assertEqual([e.index for e in second], [e.index for e in first])
+        self.assertEqual([e.label for e in second], [e.label for e in first])
+
+    def test_refresh_asks_for_a_real_scan(self) -> None:
+        from unittest import mock
+
+        from mimiccam import capture
+
+        devices = self._CountingDevices()
+        with mock.patch.object(capture, "dshow_device_names", lambda: devices.names), \
+                mock.patch.object(capture, "_open_capture", side_effect=devices.open):
+            capture.clear_scan_cache()
+            self.addCleanup(capture.clear_scan_cache)
+            capture.scan_cameras()
+            opened_once = len(devices.opened)
+            capture.scan_cameras(force=True)
+
+        self.assertGreater(len(devices.opened), opened_once)
+
+    def test_a_camera_coming_or_going_drops_the_cache(self) -> None:
+        from unittest import mock
+
+        from mimiccam import capture
+
+        devices = self._CountingDevices()
+        with mock.patch.object(capture, "_open_capture", side_effect=devices.open), \
+                mock.patch.object(capture, "dshow_device_names", lambda: devices.names):
+            capture.clear_scan_cache()
+            self.addCleanup(capture.clear_scan_cache)
+            capture.scan_cameras()
+            devices.names.append("DroidCam Video")  # someone plugged a phone in
+            entries = capture.scan_cameras()
+
+        self.assertEqual(len(entries), 3, "a new device was hidden by the cache")
+        self.assertIn("DroidCam Video", [e.label for e in entries])
+
+    def test_the_cache_expires(self) -> None:
+        from unittest import mock
+
+        from mimiccam import capture
+
+        devices = self._CountingDevices()
+        with mock.patch.object(capture, "dshow_device_names", lambda: devices.names), \
+                mock.patch.object(capture, "_open_capture", side_effect=devices.open):
+            capture.clear_scan_cache()
+            self.addCleanup(capture.clear_scan_cache)
+            capture.scan_cameras()
+            opened_once = len(devices.opened)
+            capture.scan_cameras(max_age_s=0.0)
+
+        self.assertGreater(len(devices.opened), opened_once)
+
+    def test_no_index_past_the_device_list_is_probed(self) -> None:
+        """Two cameras means indices 0 and 1; 2-5 are provably not video inputs."""
+        from unittest import mock
+
+        from mimiccam import capture
+
+        tried: list[int] = []
+
+        def refuse(index, *_args):
+            tried.append(index)
+            raise RuntimeError("no device here")
+
+        with mock.patch.object(capture, "dshow_device_names", lambda: ["A", "B"]), \
+                mock.patch.object(capture, "_open_capture", side_effect=refuse):
+            capture.probe_cameras()
+        self.assertEqual(sorted(tried), [0, 1])
+
+    def test_parallel_probes_keep_their_own_index(self) -> None:
+        """Concurrency must not shuffle which picture belongs to which camera."""
+        from unittest import mock
+
+        from mimiccam import capture
+
+        levels = {0: 10, 1: 120, 2: 60, 3: 200}
+
+        class Device:
+            def __init__(self, index) -> None:
+                self.index = index
+
+            def isOpened(self):  # noqa: N802 - matches cv2
+                return True
+
+            def read(self):
+                import time as _time
+
+                _time.sleep(0.05 * self.index)  # later devices finish later
+                frame = np.full((32, 32, 3), levels[self.index], dtype=np.uint8)
+                frame[0, 0] = 255  # noise so it counts as lit at 200
+                return True, frame
+
+            def release(self):
+                pass
+
+        with mock.patch.object(capture, "dshow_device_names",
+                               lambda: [f"Cam {i}" for i in range(4)]), \
+                mock.patch.object(capture, "_open_capture", side_effect=Device):
+            entries = capture.probe_cameras()
+
+        pairs = {entry.index: (entry.name, round(entry.mean_luma, 1)) for entry in entries}
+        self.assertEqual(len(pairs), 4)
+        for index, level in levels.items():
+            self.assertEqual(pairs[index][0], f"Cam {index}")
+            self.assertAlmostEqual(pairs[index][1], level, delta=3)
+
+    def test_without_a_device_list_the_fallback_bound_holds(self) -> None:
+        from unittest import mock
+
+        from mimiccam import capture
+
+        tried: list[int] = []
+
+        def refuse(index, *_args):
+            tried.append(index)
+            raise RuntimeError("no device here")
+
+        with mock.patch.object(capture, "dshow_device_names", lambda: []), \
+                mock.patch.object(capture, "_open_capture", side_effect=refuse):
+            capture.probe_cameras()
+        self.assertEqual(tried, list(range(6)))
+
+    def test_a_camera_is_called_what_windows_calls_it(self) -> None:
         from mimiccam.capture import CameraEntry
 
-        self.assertIn("no light", CameraEntry(0, 1280, 720, 0.1).label)
-        self.assertNotIn("no light", CameraEntry(1, 1280, 720, 90.0).label)
+        # No index prefix, no resolution, no note: the picker reads like the
+        # device list in every other app on the machine.
+        self.assertEqual(CameraEntry(1, 1280, 720, 90.0, name="Integrated Webcam").label,
+                         "Integrated Webcam")
+        self.assertEqual(CameraEntry(2, 640, 480, 0.4, name="DroidCam Video").label,
+                         "DroidCam Video")
+
+    def test_a_nameless_device_falls_back_to_its_index(self) -> None:
+        from mimiccam.capture import CameraEntry
+
+        self.assertEqual(CameraEntry(3, 640, 480, 10.0).label, "Camera 3")
 
 
 class ModelBookkeepingTests(unittest.TestCase):
@@ -673,10 +1014,13 @@ class ModelBookkeepingTests(unittest.TestCase):
         self.assertTrue(models.is_ready(models.STUDIO_KEYS) is False)
 
     def test_truncated_file_is_not_accepted(self) -> None:
-        spec = models.BY_KEY["swapper"]
-        models.path("swapper").write_bytes(b"0" * 1024)
-        self.assertFalse(models.present("swapper"))
+        # The 256 px network is the core swapper now; inswapper_128 is the
+        # fallback a fresh install no longer fetches.
+        spec = models.BY_KEY["swapper_256"]
+        models.path("swapper_256").write_bytes(b"0" * 1024)
+        self.assertFalse(models.present("swapper_256"))
         self.assertIn(spec, models.missing())
+        self.assertNotIn("swapper", models.CORE_KEYS)
 
     def test_correctly_sized_file_is_accepted(self) -> None:
         spec = models.BY_KEY["detector"]
