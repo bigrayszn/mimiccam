@@ -195,6 +195,24 @@ class SettingsTests(unittest.TestCase):
         settings.save()
         self.assertFalse(config.Settings.load().pip_camera)
 
+    def test_the_camera_list_survives_a_restart(self) -> None:
+        """The picker opens from this, so it has to come back out intact."""
+        settings = config.Settings(cameras=[
+            {"index": 1, "name": "Integrated Webcam", "width": 1920,
+             "height": 1080, "mean_luma": 130.5},
+            {"index": 6, "name": "OBS Virtual Camera", "width": 640,
+             "height": 480, "mean_luma": 54.0},
+        ])
+        settings.save()
+        loaded = config.Settings.load()
+        self.assertEqual([c["name"] for c in loaded.cameras],
+                         ["Integrated Webcam", "OBS Virtual Camera"])
+        self.assertEqual(loaded.cameras[1]["index"], 6)
+
+    def test_an_old_settings_file_has_no_camera_list(self) -> None:
+        config.SETTINGS_PATH.write_text('{"camera_index": 2}', encoding="utf-8")
+        self.assertEqual(config.Settings.load().cameras, [])
+
     def test_key_is_masked(self) -> None:
         self.assertEqual(config.mask_key(""), "(none)")
         self.assertNotIn("secret", config.mask_key("ek_secret_value"))

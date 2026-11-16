@@ -3,7 +3,7 @@
 """On-device model files for the free, local engine.
 
 Nothing here talks to a paid API. The local engine needs three open-weight
-files, downloaded once (~700 MB total) into ``%APPDATA%\\MimicCam\\models``.
+files, downloaded once (~640 MB total) into ``%APPDATA%\\MimicCam\\models``.
 Studio background adds two more, fetched only when that mode is enabled:
 
 =====================  ======================================  ============
@@ -12,6 +12,8 @@ file                   job                                      size
 ``yunet.onnx``         face detection + 5 landmarks (OpenCV Zoo) 0.2 MB
 ``w600k_r50.onnx``     ArcFace identity embedding                166 MB
 ``inswapper_128.onnx`` 128x128 identity swap                     528 MB
+``hyperswap_1a_256.onnx`` 256x256 identity swap (the tier above)  402 MB
+``xseg_3.onnx``        occlusion mask for that tier               70 MB
 ``rvm_mobilenetv3_fp32.onnx`` person matte, temporally stable    15 MB
 ``lama_fp32.onnx``     large-mask inpainting for the room plate  208 MB
 =====================  ======================================  ============
@@ -35,13 +37,26 @@ from typing import Callable, Iterable, Optional
 
 CHUNK = 1 << 20
 ENV_MODELS_DIR = "MIMICCAM_MODELS_DIR"
+# Built locally from the fp16 download, never fetched: see convert_swapper_fp32.
+SWAPPER_FP32_FILENAME = "hyperswap_1a_256_fp32.onnx"
 _UA = "MimicCam/0.1 (+https://github.com/your-org/mimiccam)"
 
 INSIGHTFACE_URL = "https://github.com/deepinsight/insightface/releases/download/v0.7"
 
 # The identity and swap models are always needed. The studio models are only
 # downloaded when the user turns the reference-room background on.
-CORE_KEYS = ("detector", "identity", "swapper")
+#
+# The 256 px tier *is* the swap network now, so it is core along with its XSeg
+# mask. inswapper_128 stays downloadable - a rig that cannot run the 256 px
+# network still swaps on it - but a fresh install no longer spends 528 MB on a
+# network it will not use.
+CORE_KEYS = ("detector", "identity", "swapper_256", "occluder")
+FALLBACK_KEYS = ("swapper",)
+# The 256 px tier: the swap network that replaced inswapper_128 and the XSeg
+# mask that keeps hands and hair out of the paste. Optional - a rig holding only
+# the core files keeps working on the 128 px network. The fp32 copy of the swap
+# network is derived from swapper_256 (convert_swapper_fp32), not downloaded.
+TIER_KEYS = ("swapper_256", "occluder")
 STUDIO_KEYS = ("matte", "inpaint")
 # Optional: only fetched when the user leaves the Detail pass on.
 DETAIL_KEYS = ("enhancer",)
@@ -94,6 +109,22 @@ SPECS: tuple[ModelSpec, ...] = (
         licence="InsightFace: non-commercial research use only",
     ),
     ModelSpec(
+        key="swapper_256",
+        filename="hyperswap_1a_256.onnx",
+        url="https://huggingface.co/facefusion/models-3.3.0/resolve/main/hyperswap_1a_256.onnx",
+        size_bytes=402742682,
+        purpose="256x256 identity swap network (HyperSwap 1a): 4x the pixels, own face mask",
+        licence="ResearchRAIL (FaceFusion Labs): non-commercial research use only",
+    ),
+    ModelSpec(
+        key="occluder",
+        filename="xseg_3.onnx",
+        url="https://huggingface.co/facefusion/models-3.2.0/resolve/main/xseg_3.onnx",
+        size_bytes=70327709,
+        purpose="XSeg occlusion mask: keeps hands, hair and objects in front of the face",
+        licence="GPL-3.0 (DeepFaceLab); compatible with this app's GPL-2.0-or-later",
+    ),
+    ModelSpec(
         key="matte",
         filename="rvm_mobilenetv3_fp32.onnx",
         url="https://huggingface.co/eafish/web-onnx/resolve/"
@@ -143,6 +174,56 @@ def models_dir() -> Path:
 
 def path(key: str) -> Path:
     return models_dir() / BY_KEY[key].filename
+
+
+def swapper_fp32_path() -> Path:
+    """The fp32 copy of the 256 px network, built from the fp16 download."""
+    return models_dir() / SWAPPER_FP32_FILENAME
+
+
+def _fp32_complete() -> bool:
+    """True when the fp32 copy exists and looks like a full rewrite."""
+    try:
+        size = swapper_fp32_path().stat().st_size
+        source = path("swapper_256").stat().st_size
+    except OSError:
+        return False
+    # fp16 -> fp32 doubles every weight, so a stub or half-written file is not it.
+    return size > source * 1.5
+
+
+def swapper_path() -> Path:
+    """The best swap network on disk: the 256 px tier when it is installed.
+
+    Deliberately not an error when the tier is missing. A user who has the core
+    three files gets the 128 px network and everything else exactly as before;
+    the upgrade is additive.
+
+    The fp32 copy wins over the fp16 download it was built from. DirectML runs
+    the fp16 graph at half precision and loses the identity - on a real frame
+    the pasted face scored 0.49 cosine against the character photo, where the
+    same weights in fp32 scored 0.70 at 32 ms a render. See
+    ``convert_swapper_fp32``.
+    """
+    if _fp32_complete():
+        return swapper_fp32_path()
+    if present("swapper_256"):
+        return path("swapper_256")
+    return path("swapper")
+
+
+def swapper_precision() -> str:
+    """``'fp32'``, ``'fp16'`` or ``''`` for the network ``swapper_path`` returns."""
+    chosen = swapper_path()
+    if chosen.name == SWAPPER_FP32_FILENAME:
+        return "fp32"
+    if chosen.name == BY_KEY["swapper_256"].filename:
+        return "fp16"
+    return ""
+
+
+def tier_ready() -> bool:
+    return present("swapper_256") and present("occluder")
 
 
 def _looks_complete(spec: ModelSpec, target: Path) -> bool:
@@ -250,7 +331,107 @@ def ensure(progress: Optional[Progress] = None, cancel=None,
     chosen = selected(keys)
     for spec in [s for s in chosen if not present(s.key)]:
         download(spec.key, progress=progress, cancel=cancel)
+    if any(spec.key == "swapper_256" for spec in chosen):
+        prepare_swapper_fp32(progress=progress, cancel=cancel)
     return [path(spec.key) for spec in chosen]
+
+
+# -- the fp32 copy of the 256 px network ----------------------------------
+def convert_swapper_fp32(progress: Optional[Progress] = None, cancel=None) -> Path:
+    """Rewrite the fp16 256 px network as fp32, next to it. No download.
+
+    FaceFusion ships HyperSwap in fp16, and DirectML runs an fp16 graph at half
+    precision - which costs identity, not just sharpness: on the frame this
+    tier was built against, the pasted face scored **0.49** cosine against the
+    character photo from the fp16 file and **0.70** from this fp32 copy (19 and
+    32 ms a render; the 128 px network it replaces scores 0.87 at 37 ms, and a
+    fused fp16 graph scores 0.16, so fp16 is not usable on this GPU at all).
+
+    The weights are identical and no file is fetched: every float16 tensor in
+    the graph is re-typed float32. ~40 s once, 768 MB on disk.
+    """
+    source = path("swapper_256")
+    if not present("swapper_256"):
+        raise ModelError("the 256 px network is not installed yet")
+    target = swapper_fp32_path()
+    if _fp32_complete():
+        return target
+    try:
+        import numpy as np
+        import onnx
+        from onnx import TensorProto, numpy_helper
+    except ImportError as exc:  # pragma: no cover - onnx is a hard dependency
+        raise ModelError(
+            "The 'onnx' package is needed to prepare the 256 px network. "
+            "Install it with: pip install onnx"
+        ) from exc
+
+    total = source.stat().st_size
+
+    def report(share: float) -> None:
+        if progress is not None:
+            progress("swapper_256", int(share * total), total)
+
+    graph = onnx.load(str(source))
+    initialisers = graph.graph.initializer
+    for index, init in enumerate(initialisers):
+        if cancel is not None and cancel.is_set():
+            raise ModelError("Conversion cancelled")
+        if init.data_type == TensorProto.FLOAT16:
+            array = numpy_helper.to_array(init).astype(np.float32)
+            init.CopyFrom(numpy_helper.from_array(array, init.name))
+        if index % 16 == 0:
+            report(0.9 * index / max(1, len(initialisers)))
+
+    def retype(sequence) -> None:
+        for value in sequence:
+            if value.type.tensor_type.elem_type == TensorProto.FLOAT16:
+                value.type.tensor_type.elem_type = TensorProto.FLOAT
+
+    retype(graph.graph.input)
+    retype(graph.graph.output)
+    retype(graph.graph.value_info)
+    for node in graph.graph.node:
+        if node.op_type == "Cast":
+            for attr in node.attribute:
+                if attr.name == "to" and attr.i == TensorProto.FLOAT16:
+                    attr.i = TensorProto.FLOAT
+        elif node.op_type == "Constant":
+            for attr in node.attribute:
+                if attr.name == "value" and attr.t.data_type == TensorProto.FLOAT16:
+                    attr.t.CopyFrom(numpy_helper.from_array(
+                        numpy_helper.to_array(attr.t).astype(np.float32)))
+
+    onnx.checker.check_model(graph)
+    report(0.95)
+    partial = target.with_name(target.name + ".part")
+    try:
+        onnx.save(graph, str(partial))
+        partial.replace(target)
+    except Exception:
+        partial.unlink(missing_ok=True)
+        raise
+    report(1.0)
+    return target
+
+
+def prepare_swapper_fp32(progress: Optional[Progress] = None,
+                         cancel=None) -> Optional[Path]:
+    """Build the fp32 copy if the tier is installed and it is not there yet.
+
+    Best effort by design. The fp16 network still swaps, just with a weaker
+    likeness, so a full disk - or a machine where the rewrite fails for any
+    other reason - must not turn a download that otherwise succeeded into an
+    error the user cannot get past.
+    """
+    if _fp32_complete():
+        return swapper_fp32_path()
+    if not present("swapper_256"):
+        return None
+    try:
+        return convert_swapper_fp32(progress=progress, cancel=cancel)
+    except (OSError, MemoryError, ModelError):
+        return None
 
 
 def licence_summary() -> str:

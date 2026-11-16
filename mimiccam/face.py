@@ -22,7 +22,7 @@ from typing import Optional, Sequence
 import cv2
 import numpy as np
 
-from . import gpu
+from . import exposure, gpu
 
 # The 112x112 template InsightFace aligns to before recognition / swapping.
 ARCFACE_DST = np.array(
@@ -168,34 +168,252 @@ class LandmarkSmoother:
         self._velocity = None
 
 
-def match_tone(texture: np.ndarray, reference: np.ndarray, strength: float = 0.6) -> np.ndarray:
-    """Match a rendered face's colour statistics to the frame it came from.
+# The texture is matched to the *skin* of the live crop, not to the whole crop.
+# A crop's corners hold background - a bright wall behind a backlit head - and
+# averaging that in is how a swap ends up as a pale mask on a dark face: the
+# network's own face is pulled toward the wall instead of toward the person.
+# This soft ellipse sits over the cheeks and nose, inside the jaw and below the
+# eyes, and is identical in the texture and in the frame.
+TONE_DX = 0.30
+TONE_DY = 0.30
+TONE_CY = 0.56
+# Lightness may be stretched a little to follow the frame's own contrast. More
+# than this and a flat render gains grain it never had, or a lit face goes grey.
+TONE_GAIN = (0.85, 1.20)
 
-    The network re-lights the face it generates. Pasting a studio-bright face
-    onto a dim room (or the reverse) is what makes a swap read as a sticker, so
-    the render is pulled toward the lighting of the live crop before compositing.
+
+def tone_patch(size: int) -> np.ndarray:
+    """Skin region of an aligned crop, as a boolean mask (cached per size)."""
+    cached = _tone_patches.get(size)
+    if cached is None:
+        mask = np.zeros((size, size), dtype=np.uint8)
+        cv2.ellipse(mask, (size // 2, int(size * TONE_CY)),
+                    (max(2, int(size * TONE_DX)), max(2, int(size * TONE_DY))),
+                    0, 0, 360, 255, -1)
+        cached = mask > 0
+        _tone_patches[size] = cached
+    return cached
+
+
+_tone_patches: dict[int, np.ndarray] = {}
+
+
+def match_tone(texture: np.ndarray, reference: np.ndarray,
+               strength: float = 0.85) -> np.ndarray:
+    """Match a rendered face's colour to the skin of the frame it came from.
+
+    The network re-lights the face it generates, and in a backlit room it hands
+    back a studio-bright face. Pasting that unchanged is the "pale mask glued to
+    a dark person" look: the face is 20 levels brighter than the neck under it.
+    The render is therefore pulled toward the live face's own skin - lightness
+    with a clipped gain, chroma by offset only, so a warm lamp or a cool screen
+    carries over without turning skin green or pink.
     """
     if texture.shape[:2] != reference.shape[:2]:
         reference = cv2.resize(reference, (texture.shape[1], texture.shape[0]))
-    height, width = texture.shape[:2]
-    box = (slice(int(height * 0.2), int(height * 0.8)), slice(int(width * 0.2), int(width * 0.8)))
+    size = texture.shape[0]
+    patch = tone_patch(size)
 
     tex_lab = cv2.cvtColor(texture, cv2.COLOR_BGR2LAB).astype(np.float32)
     ref_lab = cv2.cvtColor(reference, cv2.COLOR_BGR2LAB).astype(np.float32)
+    tex_pixels = tex_lab[patch]
+    ref_pixels = ref_lab[patch]
+    if tex_pixels.shape[0] < 32 or ref_pixels.shape[0] < 32:
+        return texture
+    tex_mean = tex_pixels.mean(axis=0)
+    ref_mean = ref_pixels.mean(axis=0)
+    tex_std = tex_pixels.std(axis=0)
+    ref_std = ref_pixels.std(axis=0)
+
     out = tex_lab.copy()
-    for channel in range(3):
-        patch = tex_lab[box][:, :, channel]
-        target = ref_lab[box][:, :, channel]
-        tex_mean, tex_std = float(patch.mean()), float(patch.std()) + 1e-3
-        ref_mean, ref_std = float(target.mean()), float(target.std()) + 1e-3
-        gain = float(np.clip(ref_std / tex_std, 0.75, 1.25))
-        adjusted = (tex_lab[:, :, channel] - tex_mean) * gain + ref_mean
-        out[:, :, channel] = tex_lab[:, :, channel] + strength * (adjusted - tex_lab[:, :, channel])
+    gain = float(np.clip(ref_std[0] / max(1.0, float(tex_std[0])),
+                         TONE_GAIN[0], TONE_GAIN[1]))
+    lightness = (tex_lab[:, :, 0] - tex_mean[0]) * gain + ref_mean[0]
+    out[:, :, 0] = tex_lab[:, :, 0] + strength * (lightness - tex_lab[:, :, 0])
+    for channel in (1, 2):
+        shifted = tex_lab[:, :, channel] + (ref_mean[channel] - tex_mean[channel])
+        out[:, :, channel] = tex_lab[:, :, channel] + strength * (shifted - tex_lab[:, :, channel])
     return cv2.cvtColor(np.clip(out, 0, 255).astype(np.uint8), cv2.COLOR_LAB2BGR)
 
 
+def brighten_for_network(aligned: np.ndarray) -> np.ndarray:
+    """Lift a dark crop so the swap network can see the face in it.
+
+    The 128 px network returns a near-silhouette when the face it is handed sits
+    under about luma 50, so a backlit frame used to be lifted whole - and the
+    published frame with it, which is what turns a dim room into a washed-out
+    one. The lift belongs to the network's input alone: the render is tone
+    matched back to the unlifted crop straight afterwards, so the frame keeps the
+    camera's own exposure.
+    """
+    luma = float(cv2.cvtColor(aligned, cv2.COLOR_BGR2GRAY).mean())
+    gamma = exposure.gamma_for_luma(luma, exposure.TARGET_LUMA, exposure.GAMMA_MIN)
+    if gamma is None:
+        return aligned
+    key = round(gamma, 3)
+    table = _lift_tables.get(key)
+    if table is None:
+        table = exposure.lut_for(key)
+        if len(_lift_tables) > 64:
+            _lift_tables.clear()
+        _lift_tables[key] = table
+    return cv2.LUT(aligned, table)
+
+
+_lift_tables: dict[float, np.ndarray] = {}
+
+
+# The ramp of the face mask, in 0..255 alpha. Between these the paste is
+# partially transparent, which is exactly where a tone step between the render
+# and the frame reads as a seam around the jaw and the hairline.
+SEAM_BAND = (10.0, 245.0)
+# A correction larger than this is not a lighting offset but a different face in
+# a different place; leave it alone rather than paint a bright halo.
+SEAM_LIMIT = 48.0
+# The ramp runs along the jaw, and on a backlit frame part of it is the wall the
+# camera metered for rather than the person. Measuring there dragged the whole
+# face toward the wall: on a real dim frame the paste came out at luma 56 where
+# the frame's own face sat at 46, and the face's level rode the wall's: sd 2.1
+# levels over a run whose source face moved by 0.4. So the ramp is read only
+# where the frame there is plausibly the face's own skin - within this fraction
+# of the face's interior, plus a few levels of slack so a flat face is not gated
+# away - and the gate is skipped when there is no interior to calibrate against.
+SEAM_GATE = (0.55, 1.35)
+SEAM_GATE_SLACK = 12
+# The offset describes a constant colour step, but the pixels it is read from
+# change every frame as the head moves, so a per-frame reading pumps. Measured
+# on a moving head in a dim room, the offset's own range was 11 levels against a
+# source face that moved by 1.5 - a face that brightens and darkens with the
+# head, which is invisible in a 720p still and obvious in a 640x360 tile. The
+# lock closes this share of the gap to each new reading and never moves faster
+# than SEAM_SLEW levels a frame: ~0.25 s to follow a lamp being switched on at
+# 30 fps, and slow enough that a frame's noise cannot show.
+SEAM_LOCK = 0.12
+SEAM_SLEW = 1.2
+
+
+def seam_band(target: np.ndarray, alpha: np.ndarray) -> Optional[np.ndarray]:
+    """The ramp pixels worth measuring: the blend's edge, minus background.
+
+    The ramp runs along the jaw, and on a backlit frame part of it is the wall
+    the camera metered for rather than the person. Reading there dragged the
+    whole face toward the wall: on a real dim frame the paste came out at luma 56
+    where the frame's own face sat at 46. So the ramp is kept only where the
+    frame there is plausibly the face's own skin - within SEAM_GATE of the face's
+    interior, plus a few levels of slack - and the gate is skipped when there is
+    no interior to calibrate against (a face half off the frame), which leaves
+    the old whole-ramp behaviour and its cap in place.
+    """
+    if alpha.dtype != np.uint8:
+        alpha = cv2.convertScaleAbs(alpha, alpha=255.0)
+    band = cv2.inRange(alpha, SEAM_BAND[0], SEAM_BAND[1])
+    if cv2.countNonZero(band) < 64:
+        return None
+    interior = (alpha >= 250).astype(np.uint8)
+    if cv2.countNonZero(interior) >= 200:
+        grey = cv2.cvtColor(target, cv2.COLOR_BGR2GRAY)
+        skin = float(cv2.mean(grey, mask=interior)[0])
+        if skin > 1.0:
+            keep = cv2.inRange(grey, int(max(0.0, skin * SEAM_GATE[0])),
+                               int(min(255.0, skin * SEAM_GATE[1] + SEAM_GATE_SLACK)))
+            band = cv2.bitwise_and(band, keep)
+            if cv2.countNonZero(band) < 64:
+                return None
+    return band
+
+
+def seam_offset(warped: np.ndarray, target: np.ndarray,
+                alpha: np.ndarray) -> Optional[np.ndarray]:
+    """The colour step between a warped face and the frame, in the ramp.
+
+    ``match_tone`` matches the render's statistics to the live crop, but it does
+    so in the crop's own coordinates and only partially. What is left over is a
+    colour step at the mask boundary: the soft ramp then paints a ring of one
+    skin tone fading into another, which is the pale blotch around the jaw in a
+    dim room.
+
+    Returns the mean per-channel difference (BGR, float32), or None when the
+    ramp holds too few usable pixels to trust - a face half off the frame, or a
+    ramp whose pixels are all background.
+    """
+    # inRange + mean(mask=...) rather than boolean indexing: the fancy-index
+    # version allocates a float copy of the whole ROI and cost 8.7 ms a paste,
+    # which is a quarter of the frame budget for a colour offset.
+    band = seam_band(target, alpha)
+    if band is None:
+        return None
+    difference = cv2.subtract(target, warped, dtype=cv2.CV_16S)
+    values = cv2.mean(difference, mask=band)[:3]
+    offset = np.array(values, dtype=np.float32)
+    if not np.all(np.isfinite(offset)):
+        return None
+    return np.clip(offset, -SEAM_LIMIT, SEAM_LIMIT)
+
+
+def apply_offset(texture: np.ndarray, offset: np.ndarray) -> np.ndarray:
+    """Move a whole texture by a constant colour offset."""
+    shifted = texture.astype(np.int16) + np.rint(offset).astype(np.int16)
+    return np.clip(shifted, 0, 255).astype(np.uint8)
+
+
+
+
+
+class ToneLock:
+    """Holds the paste's colour offset steady from one frame to the next.
+
+    The seam offset is a measurement of a constant, and it is read every frame
+    from a ramp that slides over the jaw as the head moves. Left raw, the face's
+    brightness follows that noise at 30 Hz. This averages it with a bounded
+    speed, so a real change of light is followed in a quarter of a second and a
+    single frame's reading is not a visible step.
+
+    One lock belongs to one swapper: it is the state of the face being pasted,
+    so a new character photo or a face that left the frame starts it over.
+    """
+
+    def __init__(self, rate: float = SEAM_LOCK, slew: float = SEAM_SLEW) -> None:
+        self.rate = float(rate)
+        self.slew = float(slew)
+        self._value: Optional[np.ndarray] = None
+
+    def smooth(self, measured: np.ndarray) -> np.ndarray:
+        measured = np.asarray(measured, dtype=np.float32).reshape(-1)
+        if self._value is None or self._value.shape != measured.shape:
+            self._value = measured.copy()
+            return self._value
+        step = np.clip(self.rate * (measured - self._value), -self.slew, self.slew)
+        self._value = self._value + step
+        return self._value
+
+    def reset(self) -> None:
+        self._value = None
+
+    @property
+    def value(self) -> Optional[np.ndarray]:
+        return None if self._value is None else self._value.copy()
+
+
+def seam_shift(warped: np.ndarray, target: np.ndarray, alpha: np.ndarray) -> np.ndarray:
+    """Offset a warped face so its edge sits at the frame's own colour.
+
+    The one-shot form: measure the step in the ramp and add it back to the whole
+    texture. At the ramp the two then agree, so the boundary disappears; the
+    interior keeps every bit of its structure because a constant offset moves
+    the whole face, not its detail. The engine pastes through a ``ToneLock``
+    instead, so the offset cannot pump from frame to frame.
+
+    Returns the texture unchanged when the ramp cannot be trusted or when the
+    difference is smaller than a level.
+    """
+    offset = seam_offset(warped, target, alpha)
+    if offset is None or float(np.abs(offset).max()) < 1.0:
+        return warped
+    return apply_offset(warped, offset)
+
+
 def composite(frame_bgr: np.ndarray, texture: np.ndarray, mask: np.ndarray,
-              matrix: np.ndarray) -> np.ndarray:
+              matrix: np.ndarray, lock: Optional["ToneLock"] = None) -> np.ndarray:
     """Warp a face texture back onto the frame, inside its own bounding box.
 
     Warping two full 1080p planes costs more than the swap network itself, so
@@ -227,6 +445,12 @@ def composite(frame_bgr: np.ndarray, texture: np.ndarray, mask: np.ndarray,
 
     warped = cv2.warpAffine(texture, roi_matrix, roi_size, flags=cv2.INTER_LINEAR)
     alpha = cv2.warpAffine(mask, roi_matrix, roi_size, flags=cv2.INTER_LINEAR)
+    offset = seam_offset(warped, frame_bgr[y0:y1, x0:x1], alpha)
+    if offset is not None:
+        if lock is not None:
+            offset = lock.smooth(offset)
+        if float(np.abs(offset).max()) >= 1.0:
+            warped = apply_offset(warped, offset)
     # uint8 SIMD blending: the float-plane version cost 4.8 ms for a 465 px
     # face on this laptop, this one 0.7 ms. The 1/255 quantisation of the soft
     # edge is below the camera's own noise floor.
@@ -456,11 +680,15 @@ def default_providers(prefer_gpu: bool = True) -> list:
     return ["CPUExecutionProvider"]
 
 
-def _session(model_path: str | Path, providers: Optional[list[str]] = None):
+def _session(model_path: str | Path, providers: Optional[list[str]] = None,
+             optimize: str = "all"):
     import onnxruntime as ort
 
     options = ort.SessionOptions()
-    options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    options.graph_optimization_level = (
+        ort.GraphOptimizationLevel.ORT_ENABLE_BASIC if optimize == "basic"
+        else ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    )
     # The pipeline already has capture and output threads; keep the inference
     # threads from fighting them for cores.
     options.intra_op_num_threads = 2
@@ -498,6 +726,12 @@ class FaceEmbedder:
 # (tests/verify_motion.py) similarity to the character fell from 0.767 to 0.491
 # at 1.0 - below the 0.50 the engine requires - and 0.5 holds at 0.602 on a
 # still and 0.533 with the head moving, while still carrying the articulation.
+# How stale an occlusion reading may be before XSeg is asked again. The pass
+# runs on the render thread (see FaceSwapper._refresh_occlusion) at ~20 ms a
+# call, so it is refreshed once per render at most: at 0.12 s a hand arriving
+# is caught within about three frames.
+OCCLUSION_MAX_AGE = 0.12
+
 MOUTH_BLEND = 0.50
 
 # Both weights sit on a measured cliff, and the detail pass moved the cliff.
@@ -637,40 +871,114 @@ class FaceSwapper:
     def __init__(self, model_path: str | Path, providers: Optional[list[str]] = None,
                  keep_expression: bool = True) -> None:
         self.model_path = str(model_path)
-        self.session = _session(self.model_path, providers)
+        # The graph is read before the session is built, for two reasons: the
+        # emap lives in its initialisers, and an fp16 graph needs a different
+        # DirectML optimiser setting - see below.
+        graph = self._read_graph()
+        self._fp16 = self._graph_is_fp16(graph)
+        chosen = providers or default_providers()
+        # Measured on this machine: DirectML runs the fused fp16 form of
+        # HyperSwap incorrectly - the output ignores the source identity
+        # (cosine 0.164 to the character, where CPU scores 0.769). The basic
+        # optimiser does not fuse it that way and scores 0.548 in 20 ms instead
+        # of 0.164 in 25 ms, so it is both correct and faster. The 128 px fp32
+        # network is unaffected and keeps the full optimiser.
+        self.session = _session(
+            self.model_path, chosen,
+            optimize="basic" if (self._fp16 and any("Dml" in p for p in chosen)) else "all",
+        )
         # See expression_alpha: lips and eyes come from the live frame.
         self.keep_expression = bool(keep_expression)
-        self.input_names = [item.name for item in self.session.get_inputs()]
-        shape = self.session.get_inputs()[0].shape
-        self.size = int(shape[2] or 128)
-        self.emap = self._load_emap()
+        inputs = self.session.get_inputs()
+        self.input_names = [item.name for item in inputs]
+        # Architectures differ in input *order*: inswapper takes (target image,
+        # latent), while HyperSwap's export takes (source embedding, target
+        # image) - so pick by rank, not by position.
+        image_input = next((item for item in inputs if len(item.shape) == 4), None)
+        latent_input = next((item for item in inputs if len(item.shape) == 2), None)
+        if image_input is None or latent_input is None:
+            raise RuntimeError(
+                f"{self.model_path} does not look like a swap network: "
+                f"inputs are {[(i.name, i.shape) for i in inputs]}"
+            )
+        self.image_input = image_input.name
+        self.latent_input = latent_input.name
+        self.size = int(image_input.shape[2] or 128)
+        self.emap = self._emap_from(graph)
+        # HyperSwap normalises to mean/std 0.5 and ends in tanh; the inswapper
+        # family takes 0..1 and ends near 0..1. Named rather than sniffed, since
+        # a wrong constant here reads as a washed-out or clipped face.
+        name = Path(self.model_path).name.lower()
+        self.mean, self.std = (0.5, 0.5) if "hyperswap" in name else (0.0, 1.0)
+        self.mask_output = next(
+            (item.name for item in self.session.get_outputs()
+             if len(item.shape) == 4 and int(item.shape[1] or 0) == 1),
+            None,
+        )
+        # Decided from the first render's own range: HyperSwap/FluxRT export
+        # through tanh, inswapper does not, and guessing wrong costs a frame.
+        self._tanh: Optional[bool] = None
+        self._model_mask: Optional[np.ndarray] = None
+        self.occluder = None
+        self._occlusion: Optional[np.ndarray] = None
+        self._occlusion_ts = 0.0
 
         mask = self._oval_mask(self.size)
         self._mask = mask
         # Masks for detail-enhanced textures, which are pasted larger than the
         # network's own 128 px render.
         self._masks: dict[int, np.ndarray] = {self.size: mask}
+        # The paste's colour offset, kept steady across frames (see ToneLock).
+        self._tone_lock = ToneLock()
 
-    def _load_emap(self) -> np.ndarray:
+    def _read_graph(self):
         try:
             import onnx
-            from onnx import numpy_helper
         except ImportError as exc:  # pragma: no cover - onnx is a hard dependency
             raise RuntimeError(
                 "The 'onnx' package is required to read the swap model. "
                 "Install it with: pip install onnx"
             ) from exc
-        model = onnx.load(self.model_path, load_external_data=False)
-        initializers = model.graph.initializer
+        return onnx.load(self.model_path, load_external_data=False)
+
+    @staticmethod
+    def _graph_is_fp16(graph) -> bool:
+        """True when the weights are float16, which DirectML fuses badly."""
+        try:
+            from onnx import TensorProto
+        except ImportError:  # pragma: no cover
+            return False
+        if graph is None:
+            return False
+        return any(
+            init.data_type == TensorProto.FLOAT16
+            for init in graph.graph.initializer[:64]
+        )
+
+    def _emap_from(self, graph) -> Optional[np.ndarray]:
+        if graph is None:
+            return None
+        from onnx import numpy_helper
+
+        initializers = graph.graph.initializer
         if not initializers:
             raise RuntimeError("swap model has no initialisers; file looks corrupt")
         # fp32 keeps emap last; the fp16 conversion can append cast scalars, so
-        # look it up by name first and fall back to the documented position.
+        # look it up by name first. HyperSwap and ReSwapper consume the ArcFace
+        # vector directly and carry no emap at all - that is not an error.
         by_name = {init.name: init for init in initializers}
-        chosen = by_name.get("emap") or initializers[-1]
+        chosen = by_name.get("emap")
+        if chosen is None:
+            squares = [
+                init for init in initializers
+                if len(init.dims) == 2 and init.dims[0] == init.dims[1] == 512
+            ]
+            chosen = squares[0] if len(squares) == 1 else None
+        if chosen is None:
+            return None
         emap = numpy_helper.to_array(chosen).astype(np.float32)
         if emap.ndim != 2 or emap.shape[0] != emap.shape[1]:
-            raise RuntimeError(f"unexpected emap shape {emap.shape}")
+            return None
         return emap
 
     @staticmethod
@@ -691,6 +999,13 @@ class FaceSwapper:
 
     def latent(self, embedding: np.ndarray) -> np.ndarray:
         vector = np.asarray(embedding, dtype=np.float32).reshape(1, -1)
+        if self.emap is None:
+            # HyperSwap takes the identity vector itself, unit-normed
+            # ("embedding_norm" in FaceFusion's model metadata).
+            norm = float(np.linalg.norm(vector))
+            if norm:
+                vector = vector / norm
+            return vector.astype(np.float32)
         projected = vector @ self.emap
         norm = float(np.linalg.norm(projected))
         if norm:
@@ -699,19 +1014,34 @@ class FaceSwapper:
 
     def render(self, frame_bgr: np.ndarray, landmarks: np.ndarray,
                embedding: np.ndarray) -> np.ndarray:
-        """The swapped face as a 128x128 BGR texture, in crop coordinates."""
+        """The swapped face as a BGR texture, in crop coordinates.
+
+        The crop handed to the network is brightened when the room is dim - the
+        network needs to see a face to render one - but the texture comes back
+        matched to the *unlifted* crop, so the pasted face sits in the room's own
+        light instead of glowing out of it.
+        """
         matrix = norm_matrix(landmarks, self.size)
         aligned = crop(frame_bgr, matrix, self.size)
-        blob = cv2.dnn.blobFromImage(
-            aligned, 1.0 / 255.0, (self.size, self.size), (0.0, 0.0, 0.0), swapRB=True
-        )
+        seen = brighten_for_network(aligned)
+        scaled = seen.astype(np.float32) / 255.0
+        if self.mean or self.std != 1.0:
+            scaled = (scaled - self.mean) / self.std
+        # swapRB: the graphs were trained on RGB, the frame is BGR.
+        blob = np.ascontiguousarray(scaled[:, :, ::-1].transpose(2, 0, 1)[None])
         outputs = self.session.run(
-            None, {self.input_names[0]: blob, self.input_names[1]: self.latent(embedding)}
+            None, {self.image_input: blob, self.latent_input: self.latent(embedding)}
         )
         rendered = outputs[0][0].transpose(1, 2, 0)
-        texture = np.clip(255.0 * rendered, 0, 255).astype(np.uint8)[:, :, ::-1]
-        # Re-light the render to the live crop's colour statistics: the network
-        # normalises its output, which reads as a bright sticker in a dim room.
+        if self._tanh is None:
+            self._tanh = bool(rendered.min() < -0.02)
+        if self._tanh:
+            rendered = (rendered + 1.0) * 127.5
+        else:
+            rendered = rendered * 255.0
+        texture = np.clip(rendered, 0, 255).astype(np.uint8)[:, :, ::-1]
+        self._keep_model_mask(outputs)
+        self._refresh_occlusion(aligned)
         return match_tone(texture, aligned)
 
     def mask_for(self, size: int) -> np.ndarray:
@@ -753,37 +1083,135 @@ class FaceSwapper:
         """
         size = int(texture.shape[0])
         matrix = self.matrix_for(landmarks, size)
+        # One crop per paste, shared by the expression blend and the occluder.
+        live = crop(frame_bgr, matrix, size)
         if self.keep_expression:
-            # Built in the 128 px crop space, which is where the mask geometry
-            # was tuned, then scaled up: a soft oval over the lips does not gain
-            # anything from 512 px of it, and building it there cost 2 ms a
-            # frame (6.6 ms per paste instead of 4.5).
+            # Built in the network's own crop space, which is where the mask
+            # geometry was tuned, then scaled up: a soft oval over the lips does
+            # not gain anything from 512 px of it.
             alpha = expression_alpha(self.size, landmarks, norm_matrix(landmarks, self.size))
             if alpha is not None:
                 if size != self.size:
                     alpha = cv2.resize(alpha, (size, size), interpolation=cv2.INTER_LINEAR)
-                live = crop(frame_bgr, matrix, size)
                 texture = blend_alpha(texture, live, alpha)
-        return self._composite(frame_bgr, texture, matrix)
+        return self._composite(frame_bgr, texture, matrix, self.paste_mask(size, live))
 
     def swap(self, frame_bgr: np.ndarray, landmarks: np.ndarray,
              embedding: np.ndarray) -> np.ndarray:
-        matrix = norm_matrix(landmarks, self.size)
-        aligned = crop(frame_bgr, matrix, self.size)
-        blob = cv2.dnn.blobFromImage(
-            aligned, 1.0 / 255.0, (self.size, self.size), (0.0, 0.0, 0.0), swapRB=True
+        # Goes through render() and paste() so a one-shot swap gets the same
+        # exposure handling and keeps the mouth too.
+        return self.paste(frame_bgr, self.render(frame_bgr, landmarks, embedding), landmarks)
+
+    @property
+    def tone_lock(self) -> ToneLock:
+        """The paste's colour lock, created on first use.
+
+        A swapper can be built without ``__init__`` - the paste tests do that to
+        skip loading a model - so the lock cannot assume it was set there.
+        """
+        lock = self.__dict__.get("_tone_lock")
+        if lock is None:
+            lock = ToneLock()
+            self._tone_lock = lock
+        return lock
+
+    def reset_tone(self) -> None:
+        """Forget the locked colour offset: a new face starts from a fresh read."""
+        lock = self.__dict__.get("_tone_lock")
+        if lock is not None:
+            lock.reset()
+
+    def _keep_model_mask(self, outputs: list) -> None:
+        """Store the swap network's own face mask, when it exports one.
+
+        HyperSwap returns a second tensor: the network's own idea of which
+        pixels are the face it just drew. It follows the hairline and the jaw
+        better than any ellipse, so it replaces the oval wherever it exists -
+        the oval is still multiplied in, because the network's mask reaches past
+        the jaw on a turned head and that is where a paste shows.
+        """
+        name = self.__dict__.get("mask_output")
+        if not name:
+            return
+        index = next(
+            (i for i, item in enumerate(self.session.get_outputs()) if item.name == name),
+            None,
         )
-        outputs = self.session.run(
-            None, {self.input_names[0]: blob, self.input_names[1]: self.latent(embedding)}
-        )
-        rendered = outputs[0][0].transpose(1, 2, 0)
-        fake = np.clip(255.0 * rendered, 0, 255).astype(np.uint8)[:, :, ::-1]
-        # Goes through paste() so a one-shot swap keeps the mouth too.
-        return self.paste(frame_bgr, fake, landmarks)
+        if index is None or index >= len(outputs):
+            return
+        mask = np.squeeze(np.asarray(outputs[index])).astype(np.float32)
+        if mask.ndim != 2:
+            return
+        if mask.shape != (self.size, self.size):
+            mask = cv2.resize(mask, (self.size, self.size), interpolation=cv2.INTER_LINEAR)
+        self._model_mask = np.clip(mask, 0.0, 1.0)
+
+    def _refresh_occlusion(self, aligned: np.ndarray) -> None:
+        """Read XSeg on the render thread, where the swap graph already runs.
+
+        Running it from the paste thread crashed the engine: two DirectML
+        sessions executing at once from different threads took the process down
+        (intermittently between runs, and the app's own selftest died in 2 of 2
+        attempts once the mask was attached). The CPU is not an alternative -
+        measured 630 ms a pass against 20 ms on the GPU - so the pass moved to
+        the thread that already renders, and the paste warps the cached result.
+
+        The face is rendered far less often than it is pasted, so the reading is
+        reused for a few frames (OCCLUSION_MAX_AGE): a hand that arrives is
+        caught at the next render, within ~0.1 s.
+        """
+        occluder = self.__dict__.get("occluder")
+        if occluder is None:
+            return
+        if (time.perf_counter() - self.__dict__.get("_occlusion_ts", 0.0)) <= OCCLUSION_MAX_AGE:
+            return
+        try:
+            mask = occluder.protection(aligned)
+        except Exception:
+            return
+        self._occlusion = mask
+        self._occlusion_ts = time.perf_counter()
+
+    def occlusion_mask(self, live: Optional[np.ndarray] = None) -> Optional[np.ndarray]:
+        """The cached XSeg reading. Read on the render thread; never run here.
+
+        ``live`` is accepted so the paste keeps one call signature, but it is
+        deliberately not used: the mask belongs to the render's own crop.
+        """
+        if self.__dict__.get("occluder") is None:
+            return None
+        return self.__dict__.get("_occlusion")
+
+    def paste_mask(self, size: int, live: Optional[np.ndarray] = None) -> np.ndarray:
+        """The blend mask for a paste: face shape x occlusion.
+
+        Three sources combine here, in the order they should: the network's own
+        mask if it has one (jaw and hairline), the oval (a hard ceiling on how
+        far the paste may reach), and XSeg (hands, hair, a microphone in front of
+        the face). Any one of them can veto a pixel.
+        """
+        size = int(size)
+        base = self.mask_for(size)
+        model_mask = self.__dict__.get("_model_mask")
+        if model_mask is not None:
+            if model_mask.shape != (size, size):
+                model_mask = cv2.resize(model_mask, (size, size),
+                                        interpolation=cv2.INTER_LINEAR)
+            base = base * model_mask
+        if live is not None:
+            protect = self.occlusion_mask(live)
+            if protect is not None and protect.size:
+                if protect.shape != (size, size):
+                    protect = cv2.resize(protect, (size, size),
+                                         interpolation=cv2.INTER_LINEAR)
+                base = base * protect
+        return base
 
     def _composite(self, frame_bgr: np.ndarray, texture: np.ndarray,
-                   matrix: np.ndarray) -> np.ndarray:
-        return composite(frame_bgr, texture, self.mask_for(texture.shape[0]), matrix)
+                   matrix: np.ndarray, mask: Optional[np.ndarray] = None) -> np.ndarray:
+        if mask is None:
+            mask = self.mask_for(texture.shape[0])
+        return composite(frame_bgr, texture, mask, matrix, lock=self.tone_lock)
 
 
 class FaceEnhancer:
@@ -801,6 +1229,13 @@ class FaceEnhancer:
     """
 
     SIZE = 512
+    # How much of the enhanced texture survives the identity blend. GFPGAN
+    # rebuilds eyes, lashes and skin texture, but it also drifts the face away
+    # from the identity the swap network rendered: measured on a real frame
+    # against the character photo, the pasted face scored **0.637** identity at
+    # 1.0, **0.677** at 0.7 and 0.692 at 0.55. 0.7 keeps nearly all of the
+    # detail and gives a quarter of the identity back.
+    KEEP = 0.70
 
     def __init__(self, model_path: str | Path, providers: Optional[list[str]] = None,
                  session=None) -> None:
@@ -836,7 +1271,14 @@ class FaceEnhancer:
         if float(texture.std()) < 1.0:
             # A graph that returns a flat plane has failed, not enhanced.
             return texture_bgr
-        return texture
+        # Keep a share of the network's own render under the enhanced one. The
+        # detail pass sharpens the eyes and skin but drifts identity; a 0.7/0.3
+        # mix measured 0.677 against the character photo where the pure
+        # enhanced texture measured 0.637, and at webcam scale the difference in
+        # sharpness is not visible.
+        base = cv2.resize(texture_bgr, (self.SIZE, self.SIZE),
+                          interpolation=cv2.INTER_CUBIC)
+        return cv2.addWeighted(texture, self.KEEP, base, 1.0 - self.KEEP, 0.0)
 
 
 # -- helpers ---------------------------------------------------------------
