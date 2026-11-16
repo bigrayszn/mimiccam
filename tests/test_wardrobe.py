@@ -238,6 +238,22 @@ class DressTests(unittest.TestCase):
         out = self.held.dress(self.frame, self.live_face, empty)
         self.assertEqual(int(out.mean()), 10)
 
+    def test_the_shirt_between_the_lapels_is_not_dyed(self) -> None:
+        """The dye may not reach cloth that sits inside the garment's span.
+
+        On a real pair the collar's V is open at the top, so it counted as
+        "outside" and was dyed - the grey blotches on a white shirt. Beside the
+        garment (shoulders wider than the character's) is where the dye belongs.
+        """
+        weight = np.zeros((60, 60), np.float32)
+        weight[10:50, 10:20] = 1.0          # left lapel
+        weight[10:50, 40:50] = 1.0          # right lapel
+        outside = wardrobe.outside_garment(weight)
+        self.assertAlmostEqual(float(outside[30, 30]), 0.0, places=5)   # in the V
+        self.assertAlmostEqual(float(outside[30, 2]), 1.0, places=5)    # beside it
+        self.assertAlmostEqual(float(outside[30, 58]), 1.0, places=5)
+        self.assertAlmostEqual(float(outside[2, 30]), 1.0, places=5)    # above it
+
     def test_the_live_skin_stays_on_top(self) -> None:
         alpha = np.ones((400, 300), np.float32)
         chin = self.live_face[1] + self.live_face[3]

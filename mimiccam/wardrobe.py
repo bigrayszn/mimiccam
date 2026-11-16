@@ -56,6 +56,18 @@ TOP_ABOVE_CHIN = 0.10
 MIN_COVERAGE = 0.02
 # How much of the live person's own skin stays in front of the garment.
 SKIN_KEEP = 0.90
+# The neck under the chin: how far the band reaches, and how dark a pixel has to
+# be to count as its shadow rather than cloth.
+NECK_DEPTH = 0.22       # in face heights below the chin
+NECK_SHADOW = 0.42      # HSV value below which the band is shadow, not cloth
+# The reference's white shirt carries its own shadows - under the collar, beside
+# the tie. Transplanted onto a flat white shirt they read as grey patches, so
+# bright, colourless cloth is pulled toward a clean white before it is stored.
+SHIRT_FLAT_VALUE = 0.92   # where that cloth is pulled to ...
+SHIRT_FLAT_SAT = 0.22     # ... when it is this colourless ...
+SHIRT_FLAT_FLOOR = 0.36   # ... and no darker than this (a cuﬀ, not the lining)
+SHIRT_FLAT_MIX = 1.00     # fraction of the shadow that is lifted
+
 # Edge feather, as a fraction of the patch width.
 SEAM = 0.02
 # The patch may be needed at a very different scale from the reference framing.
@@ -87,6 +99,149 @@ QUAD_DEPTH = 1.60
 # How far to search outwards when the matte has a hole at a target row (a gap
 # under the jaw, an arm across the waist), in face heights.
 QUAD_SEARCH = 0.40
+
+
+# Tie registration. The torso quad gets the garment into the right place, but it
+# is fitted to the silhouette: on a real pair of photos the reference's tie sat
+# 40-60 px left of the live one, so its edge broke over the shirt as grey slivers.
+# The tie is the one part of the outfit with a shape of its own, so it is measured
+# on both sides and the whole patch is nudged - scaled and shifted, never warped -
+# until they line up. Bounded, because a "tie" found on a T-shirt or a shadow must
+# not be allowed to throw the clothes across the frame.
+TIE_REACH = 1.9          # how far below the chin to look, in face heights
+TIE_HALF_WIDTH = 0.55    # the column searched, as a fraction of the face width
+TIE_TOP_DEPTH = 0.10     # start just under the chin, in face heights
+TIE_MIN_HEIGHT = 0.55    # a tie spans this much of the face height ...
+TIE_MIN_WIDTH = 0.06     # ... and this much of its width, at least
+TIE_MAX_WIDTH = 0.75
+TIE_SHIRT_VALUE = 0.62   # bright and colourless is the shirt, not the tie
+TIE_SHIRT_SAT = 0.22
+TIE_SHIFT = 0.25         # largest correction, in face widths / heights
+TIE_SMOOTH = 0.5         # weight of the newest fit, so a bad frame cannot snap it
+# Translation only. The two ties differ in width by 15% on the real pair, and
+# scaling the garment to match that resized the whole suit from the frame origin:
+# the tie lined up and the shoulders went 13% small. A tie's width is not a
+# measure of the body, so only the offset is taken from it.
+
+
+def tie_box(image_bgr: np.ndarray, face_box: tuple[int, int, int, int],
+            alpha: Optional[np.ndarray] = None) -> Optional[tuple[int, int, int, int]]:
+    """The necktie: the strip of cloth inside the collar's V.
+
+    A whole-blob search does not work - the tie touches the jacket and they come
+    out as one region as wide as the torso. So the search walks each row from the
+    face's centre line and keeps the run of non-shirt cloth there, but only on
+    rows with shirt on *both* sides: those are the rows where the centre line is
+    inside the collar, and there the run is the tie and nothing else.
+
+    Returns an int box (x, y, w, h) in image coordinates, or None when there is no
+    tie (a T-shirt, a jumper, a dark room, no shirt at all).
+    """
+    x, y, w, h = (int(v) for v in face_box)
+    if w < 8 or h < 8:
+        return None
+    chin = y + h
+    top = min(image_bgr.shape[0] - 1, chin + int(h * TIE_TOP_DEPTH))
+    bottom = min(image_bgr.shape[0], chin + int(h * TIE_REACH))
+    left = max(0, int(x + w * 0.5 - w * TIE_HALF_WIDTH))
+    right = min(image_bgr.shape[1], int(x + w * 0.5 + w * TIE_HALF_WIDTH))
+    if bottom - top < 8 or right - left < 8:
+        return None
+    region = image_bgr[top:bottom, left:right]
+    hsv = cv2.cvtColor(region, cv2.COLOR_BGR2HSV).astype(np.float32)
+    value = hsv[:, :, 2] / 255.0
+    saturation = hsv[:, :, 1] / 255.0
+    shirt = (value > TIE_SHIRT_VALUE) & (saturation < TIE_SHIRT_SAT)
+    skin = cv2.resize(body.skin_mask(region), (region.shape[1], region.shape[0]),
+                      interpolation=cv2.INTER_LINEAR) > 0.5
+    cloth = ~shirt & ~skin
+    if alpha is not None:
+        person = alpha[top:bottom, left:right]
+        cloth &= np.asarray(person, np.float32) > 0.5
+    centre = int(round(x + w * 0.5)) - left
+    if not 0 <= centre < region.shape[1]:
+        return None
+    widest = w * TIE_MAX_WIDTH
+    lefts, rights, rows = [], [], []
+    for row in range(region.shape[0]):
+        line = cloth[row]
+        if not line[centre]:
+            continue
+        if not shirt[row, :centre].any() or not shirt[row, centre:].any():
+            continue           # the centre line is on the jacket here, not the tie
+        lo = centre
+        while lo > 0 and line[lo - 1]:
+            lo -= 1
+        hi = centre
+        while hi + 1 < line.size and line[hi + 1]:
+            hi += 1
+        if hi - lo + 1 > widest:
+            continue
+        lefts.append(lo)
+        rights.append(hi)
+        rows.append(row)
+    if len(rows) < max(4, h * TIE_MIN_HEIGHT * 0.5):
+        return None
+    x0 = int(np.median(lefts))
+    x1 = int(np.median(rights))
+    y0, y1 = int(min(rows)), int(max(rows))
+    if x1 - x0 + 1 < w * TIE_MIN_WIDTH or y1 - y0 + 1 < h * TIE_MIN_HEIGHT * 0.5:
+        return None
+    return left + x0, top + y0, x1 - x0 + 1, y1 - y0 + 1
+
+
+def map_box(box: tuple[int, int, int, int], matrix: np.ndarray) -> tuple[int, int, int, int]:
+    """The bounding box of ``box`` after a 3x3 transform."""
+    x, y, w, h = (float(v) for v in box)
+    corners = np.array([[[x, y], [x + w, y], [x, y + h], [x + w, y + h]]], np.float32)
+    moved = cv2.perspectiveTransform(corners, matrix.astype(np.float32))[0]
+    x0, y0 = moved[:, 0].min(), moved[:, 1].min()
+    return int(round(x0)), int(round(y0)), int(round(moved[:, 0].max() - x0)), \
+        int(round(moved[:, 1].max() - y0))
+
+
+def tie_correction(predicted: tuple[int, int, int, int], live: tuple[int, int, int, int],
+                   face_box: tuple[int, int, int, int]) -> Optional[np.ndarray]:
+    """Translation that moves the predicted tie box onto the live one.
+
+    Clamped to ``TIE_SHIFT`` face widths / heights: this is a nudge on top of the
+    torso fit, and a correction that large means one of the two "ties" is not a
+    tie, so the nudge is what survives rather than the whole estimate.
+    """
+    px, py, pw, ph = (float(v) for v in predicted)
+    lx, ly, lw, lh = (float(v) for v in live)
+    if pw < 4 or ph < 4 or lw < 4 or lh < 4:
+        return None
+    # Both axes, each clamped to a fraction of the face: this is a nudge, and a
+    # correction that wants to be larger means one of the two "ties" is not one.
+    # Measured on the real pair, the vertical term matters - dropping it left 50%
+    # more reference pixels on the white shirt (3,552 vs 2,358).
+    tx = (lx + lw * 0.5) - (px + pw * 0.5)
+    ty = (ly + lh * 0.5) - (py + ph * 0.5)
+    _fx, _fy, fw, fh = (float(v) for v in face_box)
+    tx = float(np.clip(tx, -TIE_SHIFT * fw, TIE_SHIFT * fw))
+    ty = float(np.clip(ty, -TIE_SHIFT * fh, TIE_SHIFT * fh))
+    return np.array([[1.0, 0.0, tx], [0.0, 1.0, ty], [0.0, 0.0, 1.0]], np.float32)
+
+
+def outside_garment(weight: np.ndarray, threshold: float = 0.5) -> np.ndarray:
+    """1.0 on cloth beside the garment, 0.0 on cloth between its lapels.
+
+    The dye exists for cloth the garment never covers - the live shoulders wider
+    than the character's - and it is applied to the live shirt there. The shirt
+    in the collar's V is between the lapels, so on every row it sits *inside* the
+    garment's span: dyeing it is what put grey blotches on a white shirt. Walking
+    the rows separates the two cases, which a flood fill cannot: the V is open at
+    the top, so it counts as "outside" by connectivity and was dyed anyway.
+    """
+    solid = np.asarray(weight) >= threshold
+    rows = solid.any(axis=1)
+    first = np.argmax(solid, axis=1)
+    last = solid.shape[1] - 1 - np.argmax(solid[:, ::-1], axis=1)
+    columns = np.arange(solid.shape[1])[None, :]
+    between = rows[:, None] & (columns >= first[:, None]) & (columns <= last[:, None])
+    return (~between).astype(np.float32)
+
 
 
 def torso_quad(alpha: np.ndarray, face_box: tuple[int, int, int, int]) -> Optional[np.ndarray]:
@@ -152,6 +307,24 @@ def torso_quad(alpha: np.ndarray, face_box: tuple[int, int, int, int]) -> Option
     )
 
 
+def flatten_shirt(patch: np.ndarray) -> np.ndarray:
+    """Lift the shadows off the reference's white cloth.
+
+    A photographed shirt is not white: the collar throws a shadow on it and the
+    tie shades the placket beside it. On the live person's shirt those shadows
+    land on flat white and read as dirt, which is what the grey patches were.
+    Only bright, colourless cloth is touched, so the suit, the tie and the skin
+    keep every bit of their shading.
+    """
+    hsv = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV).astype(np.float32)
+    value = hsv[:, :, 2] / 255.0
+    saturation = hsv[:, :, 1] / 255.0
+    shirt = (saturation < SHIRT_FLAT_SAT) & (value > SHIRT_FLAT_FLOOR)
+    lifted = value + (SHIRT_FLAT_VALUE - value) * SHIRT_FLAT_MIX * shirt
+    hsv[:, :, 2] = np.clip(lifted, 0.0, 1.0) * 255.0
+    return cv2.cvtColor(np.clip(hsv, 0, 255).astype(np.uint8), cv2.COLOR_HSV2BGR)
+
+
 def _affine_fit(source: np.ndarray, target: np.ndarray) -> Optional[np.ndarray]:
     """Least-squares affine (3x3) mapping the source quad corners onto the target.
 
@@ -192,6 +365,15 @@ def torso_mask(image_bgr: np.ndarray, face_box: tuple[int, int, int, int],
     chin = y + h
     mask[:max(0, chin - int(h * TOP_ABOVE_CHIN))] = 0.0
     mask *= 1.0 - np.clip(body.skin_mask(image_bgr) * 1.2, 0.0, 1.0)
+    # The neck and the shadow the jaw throws on it are not cloth. A shadowed neck
+    # falls outside the YCrCb window, so it survived as "clothing", was pasted onto
+    # the live shirt and read as a grey smudge there. The band is narrow and sits
+    # under the chin, where the only cloth is the collar.
+    band_end = min(mask.shape[0], chin + int(h * NECK_DEPTH))
+    if band_end > chin > 0:
+        value = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)[:, :, 2].astype(np.float32) / 255.0
+        shadow = np.clip((NECK_SHADOW - value) / NECK_SHADOW, 0.0, 1.0)[chin:band_end]
+        mask[chin:band_end] *= 1.0 - shadow
     mask[mask < 0.35] = 0.0
     return mask
 
@@ -212,6 +394,8 @@ class Wardrobe:
         alpha = matte_model.alpha(reference_bgr)
         self.quad = torso_quad(alpha, self.face_box)
         self._live_quad: Optional[np.ndarray] = None
+        self.tie: Optional[tuple[int, int, int, int]] = None
+        self._tie_fix: Optional[np.ndarray] = None
         mask = torso_mask(reference_bgr, self.face_box, alpha)
         coverage = float(mask.mean())
         if coverage < MIN_COVERAGE:
@@ -221,9 +405,14 @@ class Wardrobe:
         rows, cols = np.nonzero(mask > 0)
         y0, y1 = int(rows.min()), int(rows.max()) + 1
         x0, x1 = int(cols.min()), int(cols.max()) + 1
-        self.patch = reference_bgr[y0:y1, x0:x1].copy()
+        self.patch = flatten_shirt(reference_bgr[y0:y1, x0:x1].copy())
         self.mask = mask[y0:y1, x0:x1].copy()
         self.origin = (x0, y0)
+        # The tie is kept in *patch* coordinates: that is what ``transform_for``
+        # produces, and mixing the two spaces put the garment a face-width off.
+        found_tie = tie_box(reference_bgr, self.face_box, alpha)
+        if found_tie is not None:
+            self.tie = (found_tie[0] - x0, found_tie[1] - y0, found_tie[2], found_tie[3])
         # Feather the outline so the garment does not end in a cut line, and ramp
         # the top: the crop's first rows are a straight cut across the chest,
         # which showed as a hard horizontal seam where the reference is wider
@@ -297,6 +486,31 @@ class Wardrobe:
             return fallback
         return transform
 
+    def _align_on_tie(self, frame_bgr: np.ndarray, live_face_box: tuple[int, int, int, int],
+                      person_alpha: np.ndarray, transform: np.ndarray) -> np.ndarray:
+        """Nudge the garment so the character's tie lands on the live tie.
+
+        The torso quad is fitted to the silhouette, so it is blind to what is on
+        the chest: the tie is what shows the error, and it is measurable on both
+        sides. Applied as a bounded similarity on top of the quad fit, smoothed
+        across frames, and dropped entirely when either tie is missing.
+        """
+        if self.tie is None:
+            self._tie_fix = None
+            return transform
+        live_tie = tie_box(frame_bgr, live_face_box, person_alpha)
+        if live_tie is None:
+            self._tie_fix = None
+            return transform
+        correction = tie_correction(map_box(self.tie, transform), live_tie, live_face_box)
+        if correction is None:
+            self._tie_fix = None
+            return transform
+        self._tie_fix = (correction if self._tie_fix is None else
+                         TIE_SMOOTH * correction + (1.0 - TIE_SMOOTH) * self._tie_fix)
+        self._tie_fix[2] = (0.0, 0.0, 1.0)
+        return self._tie_fix @ transform
+
     def dress(self, frame_bgr: np.ndarray, live_face_box: tuple[int, int, int, int],
               person_alpha: np.ndarray) -> np.ndarray:
         """Composite the garment into this frame, or return it untouched."""
@@ -305,6 +519,7 @@ class Wardrobe:
         height, width = frame_bgr.shape[:2]
         matrix, _scale = self.matrix_for(live_face_box)
         transform = self.transform_for(live_face_box, person_alpha, matrix)
+        transform = self._align_on_tie(frame_bgr, live_face_box, person_alpha, transform)
 
         # Warp only the patch's destination box: a full 720p warp of the garment
         # and its alpha costs three times what the region does.
@@ -359,7 +574,10 @@ class Wardrobe:
         # outfit, and let the transplanted cloth keep its lapels and tie on top.
         target = body.mean_lab(garment, weight)
         if target is not None:
-            out = self._dye(out, roi, clothing * (1.0 - weight), target)
+            # Only the cloth the garment does not reach from the outside: a hole
+            # inside the outline is a shirt (or a matte sag), not missing cloth.
+            dye = clothing * (1.0 - weight) * outside_garment(weight)
+            out = self._dye(out, roi, dye, target)
         return out
 
     @staticmethod
