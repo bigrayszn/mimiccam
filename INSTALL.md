@@ -1,4 +1,4 @@
-# MimicCam 0.2.4 — install and use
+# MimicCam 0.2.5 — install and use
 
 **MimicCam © 2026 Ray Bekson (bigrayszn)** — <https://github.com/bigrayszn/mimiccam>.
 Open source under GPL-2.0-or-later; the copyright stays with Ray Bekson.
@@ -42,6 +42,15 @@ the default in this build.
 - **~400 MB of disk** for the application, plus ~908 MB more if you use the local
   (free) engine.
 
+### Recommended hardware (local engine)
+
+- **CPU:** any modern 64-bit quad-core or better. Tested on an Intel Core i9-14900HX
+  (24 cores, 32 threads).
+- **RAM:** 16 GB or more. Tested on 32 GB.
+- **GPU:** any DirectX 12 GPU with DirectML. Tested on an **NVIDIA GeForce RTX 4070
+  Laptop GPU (8 GB VRAM)**, driver 610.47. The app's engine uses this GPU, not the
+  integrated Intel graphics.
+
 ### Required for Lucy 2.5 mode
 
 - **An NVIDIA GPU.** This is enforced by the app: Lucy mode refuses to start
@@ -72,7 +81,7 @@ the default in this build.
 ## 2. Install (recommended: the setup program)
 
 1. Go to the **Releases** page of this repository and download
-   **`MimicCam-0.2.4-setup.exe`** (or the portable zip from the same release).
+   **`MimicCam-0.2.5-setup.exe`** (or the portable zip from the same release).
 2. Double-click it. Windows SmartScreen will say *"Windows protected your PC"*
    because the build is not code-signed — choose **More info → Run anyway**.
 3. Accept the licence (GPL-2.0-or-later), keep the default folder
@@ -89,7 +98,7 @@ already picks a short per-user location for this reason.
 
 ### Alternative: portable ZIP
 
-Download **`MimicCam-0.2.4-win64-portable.zip`**, extract it to a **short** path such
+Download **`MimicCam-0.2.5-win64-portable.zip`**, extract it to a **short** path such
 as `C:\MimicCam`, and run `C:\MimicCam\MimicCam.exe`. Nothing is written to the
 registry; settings and downloaded models live in `%APPDATA%\MimicCam`.
 

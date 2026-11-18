@@ -1,6 +1,6 @@
 ; SPDX-FileCopyrightText: 2026 Ray Bekson (bigrayszn) <https://github.com/bigrayszn/mimiccam>
 ; SPDX-License-Identifier: GPL-2.0-or-later
-; MimicCam 0.2.4 - installer for public release.
+; MimicCam 0.2.5 - installer for public release.
 ; MimicCam and its source are Copyright (C) 2026 Ray Bekson (bigrayszn),
 ; https://github.com/bigrayszn/mimiccam - GPL-2.0-or-later.
 ;
@@ -10,16 +10,16 @@
 ; the InsightFace research licence before accepting it.
 ;
 ; Build the portable folder first:
-;   python build.py --dist C:\MimicCam-dist4
+;   python build.py --dist C:\MimicCam-dist
 ; then compile:
-;   iscc /O"C:\MimicCam-dist4\release" installer\public.iss
+;   iscc /O"C:\MimicCam-dist\release" installer\public.iss
 
 #define AppName        "MimicCam"
-#define AppVersion     "0.2.4"
+#define AppVersion     "0.2.5"
 #define AppPublisher   "Ray Bekson (bigrayszn)"
 #define AppUrl         "https://github.com/bigrayszn/mimiccam"
 #define AppExe         "MimicCam.exe"
-#define AppSource      "C:\MimicCam-dist4\MimicCam"
+#define AppSource      "C:\MimicCam-dist\MimicCam"
 #define RepoRoot       "C:\Users\offic\.config\freebuff-desktop\local-projects\2ba4c2c9-6ffa-4807-9ee5-adbff78c99c5\threads\caeb8bc427fc350c860c96235c13612bb1302ef149dfac46ec6b405eec76f2a3"
 
 [Setup]
@@ -28,8 +28,9 @@ AppName={#AppName}
 AppVersion={#AppVersion}
 AppVerName={#AppName} {#AppVersion}
 AppPublisher={#AppPublisher}
-VersionInfoVersion=0.2.4.0
+VersionInfoVersion=0.2.5.0
 VersionInfoDescription={#AppName} setup
+VersionInfoCopyright=Copyright (C) 2026 Ray Bekson (bigrayszn) - GPL-2.0-or-later
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
@@ -45,7 +46,7 @@ MinVersion=10.0
 WizardStyle=modern
 Compression=lzma2/normal
 SolidCompression=no
-OutputDir=C:\MimicCam-dist4\release
+OutputDir=C:\MimicCam-dist\release
 OutputBaseFilename={#AppName}-{#AppVersion}-setup
 CloseApplications=yes
 
